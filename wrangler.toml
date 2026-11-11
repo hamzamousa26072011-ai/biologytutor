@@ -1,13 +1,3 @@
-name = "biology-tutor-gateway"
-main = "cloudflare-worker.js"
-compatibility_date = "2025-02-01"
-compatibility_flags = ["nodejs_compat"]
-
-# Cloudflare Service Binding named AI_STUDIO_APPLET pointing to the biology-tutor worker
 [[services]]
-binding = "AI_STUDIO_APPLET"
-service = "biology-tutor"
-environment = "production"
-
-[vars]
-TARGET_ORIGIN = "https://ais-pre-c6eeh5grwbdoesvavo3tvf-908807752043.europe-west2.run.app"
+binding = "ai-studio-applet"
+service = "biologytutor"
