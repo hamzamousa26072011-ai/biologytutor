@@ -6,6 +6,8 @@ import {
 import { searchBiologyNotes } from '@/lib/biology-notes-kb';
 import { generateContentWithFallback } from '@/lib/gemini-server';
 
+export const dynamic = 'force-dynamic';
+
 export async function POST(req: NextRequest) {
   let userQuestion = '';
   try {
