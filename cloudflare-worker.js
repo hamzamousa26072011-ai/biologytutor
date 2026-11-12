@@ -1,19 +1,22 @@
 /**
- * Cloudflare Worker Tunnel / Proxy with Service Binding (AI_STUDIO_APPLET -> biology-tutor)
+ * Cloudflare Worker Tunnel / Proxy with Service Binding (ai-studio-applet -> da7ee7-biology)
  */
 const DEFAULT_ORIGIN =
   "https://ais-pre-c6eeh5grwbdoesvavo3tvf-908807752043.europe-west2.run.app";
 
 const worker = {
   async fetch(request, env) {
+    const serviceBinding =
+      env?.["ai-studio-applet"] || env?.AI_STUDIO_APPLET;
+
     if (
-      env?.AI_STUDIO_APPLET &&
-      typeof env.AI_STUDIO_APPLET.fetch === "function" &&
+      serviceBinding &&
+      typeof serviceBinding.fetch === "function" &&
       !request.headers.get("X-Service-Bound")
     ) {
       const boundHeaders = new Headers(request.headers);
       boundHeaders.set("X-Service-Bound", "1");
-      return env.AI_STUDIO_APPLET.fetch(
+      return serviceBinding.fetch(
         new Request(request.url, {
           method: request.method,
           headers: boundHeaders,
