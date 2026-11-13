@@ -46,8 +46,13 @@ export function Navbar({
       }`}
     >
       <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-2 px-2.5 py-2 sm:flex-nowrap sm:px-6 sm:py-3">
-        {/* Brand Header */}
-        <div className="flex min-w-0 items-center gap-2">
+        {/* Brand Header (Click to Refresh Website) */}
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          title="Refresh Biology Tutor"
+          className="flex min-w-0 cursor-pointer items-center gap-2 text-left transition-opacity hover:opacity-85 focus:outline-none"
+        >
           <div
             className={`flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl border transition-all ${
               isDark
@@ -80,7 +85,7 @@ export function Navbar({
               Cambridge Standards • 0610
             </span>
           </div>
-        </div>
+        </button>
 
         {/* Center Main Navigation Tabs */}
         <nav
