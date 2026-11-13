@@ -50,10 +50,13 @@ export function TutorChatTab({
     if (isTyping) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     } else if (messages.length > 0) {
-      lastMessageRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
-      });
+      const timer = setTimeout(() => {
+        lastMessageRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      }, 60);
+      return () => clearTimeout(timer);
     }
   }, [messages.length, isTyping, thinkingStepIdx]);
 
@@ -101,7 +104,7 @@ export function TutorChatTab({
   const isEmptyState = messages.length === 0 && !isTyping;
 
   return (
-    <div className="mx-auto flex h-[calc(100dvh-64px)] w-full max-w-6xl min-w-0 flex-col overflow-hidden px-3 py-3 sm:px-6 sm:py-5">
+    <div className="mx-auto flex h-[calc(100dvh-112px)] sm:h-[calc(100dvh-68px)] w-full max-w-6xl min-w-0 flex-col overflow-hidden px-3 py-3 sm:px-6 sm:py-5">
       {/* Main Chat Container filling the Chat Bot area */}
       <div
         className={`flex-1 min-w-0 overflow-y-auto overflow-x-hidden rounded-2xl border p-3.5 sm:p-6 ${

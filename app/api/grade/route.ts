@@ -36,12 +36,12 @@ async function transcribeStudentPagesDeep(
   });
 
   parts.push({
-    text: `You are an expert Cambridge IGCSE Biology (0610) handwriting and exam paper OCR specialist.
-Carefully examine every page of the Student's Answer above and transcribe ALL text with maximum precision:
-1. Transcribe every visible question number, sub-question label (e.g. 1(a)(i), (b)), printed question prompt, diagram label, table header, and pre-printed answer line unit (such as "........... %", "........... beats / min", "........... arbitrary units").
-2. Decipher and transcribe every single word, sentence, biological term, calculation, and equation written by the student (whether handwritten in pen/pencil or typed).
-3. Ignore crossed-out text that the student clearly struck through, and transcribe the student's intended words accurately without auto-correcting their biological mistakes (preserve their exact wording so it can be graded fairly).
-4. Organize the transcription clearly page-by-page and question-by-question.
+    text: `You are a Senior Cambridge IGCSE Biology (0610) Handwriting & Exam Script OCR Specialist.
+Carefully inspect every page of the Student's Answer above and perform a high-precision, line-by-line transcription:
+1. PRINTED QUESTION & ANSWER LINE: Transcribe every visible question number, sub-part label (e.g. 1(a)(i), (b)(ii)), printed question stem, diagram/graph labels, table headers, and any pre-printed unit on the answer line (such as "........... %", "........... beats / min", "........... µm", "........... arbitrary units").
+2. HANDWRITING DECIPHERING: Carefully read cursive, slanted, small, or faint pencil/pen handwriting line-by-line. Transcribe every single word, biological term, chemical symbol, arrow, table entry, and mathematical working/fraction written by the student.
+3. CROSSED-OUT & MARGIN TEXT: Ignore words or lines that the student clearly struck through/crossed out. Include valid handwritten continuations written below the lines or in margins (marked with arrows or asterisks). Do NOT auto-correct the student's biological errors—preserve their exact wording verbatim so it can be graded accurately.
+4. Organize the transcription clearly page-by-page and sub-question by sub-question.
 Return ONLY the complete verbatim transcription.`,
   });
 
@@ -76,11 +76,15 @@ async function transcribeMarkSchemePagesDeep(
   });
 
   parts.push({
-    text: `You are an expert Cambridge IGCSE Biology (0610) Official Mark Scheme OCR specialist.
-Carefully examine every page of the Official Mark Scheme above and transcribe ALL text and table rows with maximum precision:
-1. Read every column of the Cambridge Mark Scheme table: Question number (e.g. 1(a)(i)), Answer / Marking points, Marks column, and Guidance / Additional Notes column.
-2. Preserve every single semicolon (;) separating marking points, every rubric code ([B1], [M1], [A1], [C1], [1]), and the exact total/maximum marks for each part.
-3. Preserve all underlined or bolded keywords and all examiner instructions including "Accept", "Allow", "Reject" (R), "Ignore" (I), "ORA" (or reverse argument), "ECF" (error carried forward), and "AVP" (any valid point).
+    text: `You are a Senior Cambridge IGCSE Biology (0610) Official Mark Scheme OCR Specialist.
+Carefully inspect every page of the Official Mark Scheme above and transcribe ALL text and table rows with 100% precision:
+1. 4-COLUMN TABLE EXTRACTION: Read every row across all four Cambridge Mark Scheme columns:
+   - Question (e.g. 1(a)(i), 1(b))
+   - Answer / Marking Points
+   - Marks (exact integer mark allocation per part and Total/Max marks)
+   - Guidance / Additional Notes
+2. SEMICOLONS & RUBRIC CODES: Preserve every single semicolon (;) separating individual marking points, every rubric code ([B1], [M1], [A1], [C1], [1]), and all alternative "/" or "OR" phrasing.
+3. UNDERLINED KEYWORDS & EXAMINER RULES: Preserve all underlined or bolded syllabus keywords and all Guidance notes including "Accept" (A), "Allow", "Reject" (R), "Ignore" (I), "ORA" (or reverse argument), "ECF" (error carried forward), "AVP" (any valid point), and "max [X]".
 Return ONLY the complete verbatim transcription of the mark scheme.`,
   });
 
@@ -390,6 +394,11 @@ ${syllabusContext}`;
               howToEarnFullMarks: `Explicitly include "${rp.description}" using accurate Cambridge IGCSE 0610 biological terminology.`,
             }));
 
+    const cleanExaminerSummary = (
+      parsed.examinerSummary ||
+      `You scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%).`
+    ).replace(/,?\s*Grade\s+[A-U]\*?/gi, '');
+
     const finalResult: GradingResult = {
       questionTitle: parsed.questionTitle || 'Cambridge IGCSE 0610 Paper Correction',
       grade,
@@ -397,9 +406,7 @@ ${syllabusContext}`;
       awardedMarks,
       totalMarks,
       marksLost,
-      examinerSummary:
-        parsed.examinerSummary ||
-        `You scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%, Grade ${grade}).`,
+      examinerSummary: cleanExaminerSummary,
       unitRuleApplied: Boolean(
         parsed.unitRuleApplied ||
           hasUnitInPromptOrAnswerLine(effectiveStudentText, effectiveSchemeText)

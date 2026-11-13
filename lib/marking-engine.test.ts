@@ -7,6 +7,10 @@ import {
   gradeSubmissionDeterministic,
   parseFormattedLines,
   answerBiologyTutorDeterministic,
+  MAX_DAILY_QUESTIONS,
+  canUserGradeQuestion,
+  incrementDailyQuestionUsage,
+  getRemainingDailyQuestions,
 } from './marking-engine.ts';
 
 describe('Cambridge IGCSE 0610 Marking Engine & Pure Logic', () => {
@@ -42,10 +46,9 @@ describe('Cambridge IGCSE 0610 Marking Engine & Pure Logic', () => {
     assert.equal(result.awardedMarks, 2);
     assert.equal(result.marksLost, 0);
     assert.equal(result.unitRuleApplied, true);
-    assert.equal(result.grade, 'A*');
   });
 
-  it('enforces whole marks only and identifies lost marks with breakdown', () => {
+  it('enforces whole marks only, identifies lost marks, and omits letter grade from examinerSummary', () => {
     const scheme = `[B1] net movement of water molecules;\n[B1] from higher water potential to lower water potential;\n[B1] across a partially permeable membrane;`;
     const studentAnswer = 'Water moves from higher water potential to lower water potential.';
 
@@ -58,6 +61,7 @@ describe('Cambridge IGCSE 0610 Marking Engine & Pure Logic', () => {
     assert.equal(result.totalMarks, 3);
     assert.equal(result.awardedMarks >= 1 && result.awardedMarks < 3, true);
     assert.equal(result.lostMarksBreakdown.length, result.marksLost);
+    assert.equal(result.examinerSummary.includes('Grade '), false);
   });
 
   it('strips raw markdown asterisks in FormattedContent parser while preserving bold and code segments', () => {
@@ -83,5 +87,38 @@ describe('Cambridge IGCSE 0610 Marking Engine & Pure Logic', () => {
     assert.equal(answer.includes('water potential'), true);
     assert.equal(answer.toLowerCase().includes('nihal'), false);
     assert.equal(answer.toLowerCase().includes('.pdf'), false);
+  });
+
+  it('requires sign-in and enforces a strict 10 questions per day limit per user', () => {
+    const dateKey = '2026-11-12';
+    let usageMap: Record<string, number> = {};
+
+    // Unauthenticated users cannot grade
+    const guestCheck = canUserGradeQuestion(usageMap, null, dateKey);
+    assert.equal(guestCheck.allowed, false);
+
+    // Authenticated user gets 10 questions per day
+    const email = 'hamzamousa26072011@gmail.com';
+    assert.equal(MAX_DAILY_QUESTIONS, 10);
+    assert.equal(getRemainingDailyQuestions(usageMap, email, dateKey), 10);
+
+    for (let i = 0; i < 10; i++) {
+      const check = canUserGradeQuestion(usageMap, email, dateKey);
+      assert.equal(check.allowed, true);
+      assert.equal(check.used, i);
+      assert.equal(check.remaining, 10 - i);
+      usageMap = incrementDailyQuestionUsage(usageMap, email, dateKey);
+    }
+
+    // 11th question on the same day is blocked
+    const eleventhCheck = canUserGradeQuestion(usageMap, email, dateKey);
+    assert.equal(eleventhCheck.allowed, false);
+    assert.equal(eleventhCheck.used, 10);
+    assert.equal(eleventhCheck.remaining, 0);
+
+    // Next day resets back to 10 available questions
+    const nextDayCheck = canUserGradeQuestion(usageMap, email, '2026-11-13');
+    assert.equal(nextDayCheck.allowed, true);
+    assert.equal(nextDayCheck.remaining, 10);
   });
 });

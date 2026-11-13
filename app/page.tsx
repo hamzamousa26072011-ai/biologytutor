@@ -8,9 +8,13 @@ import { SignInModal, SavedPapersModal } from '@/components/Modals';
 import {
   ChatMessage,
   GradingResult,
+  MAX_DAILY_QUESTIONS,
   PageItem,
   SavedPaper,
   StudentUser,
+  canUserGradeQuestion,
+  getDailyQuestionsUsed,
+  incrementDailyQuestionUsage,
 } from '@/lib/marking-engine';
 
 export default function BiologyTutorPage() {
@@ -18,8 +22,11 @@ export default function BiologyTutorPage() {
   const [isDark, setIsDark] = useState(true);
   const [activeTab, setActiveTab] = useState<'check' | 'chat'>('check');
 
-  // Student Sign-In & Saved Papers state
+  // Student Sign-In, Daily Quota & Saved Papers state
   const [user, setUser] = useState<StudentUser | null>(null);
+  const [dailyUsageMap, setDailyUsageMap] = useState<Record<string, number>>(
+    {}
+  );
   const [savedPapers, setSavedPapers] = useState<SavedPaper[]>([]);
   const [isSignInOpen, setIsSignInOpen] = useState(false);
   const [isSavedPapersOpen, setIsSavedPapersOpen] = useState(false);
@@ -45,7 +52,7 @@ export default function BiologyTutorPage() {
   const [tutorMessages, setTutorMessages] = useState<ChatMessage[]>([]);
   const [isTutorTyping, setIsTutorTyping] = useState(false);
 
-  // Load persisted theme, student user, and saved papers from localStorage
+  // Load persisted theme, student user, daily usage, and saved papers from localStorage
   useEffect(() => {
     queueMicrotask(() => {
       try {
@@ -61,6 +68,11 @@ export default function BiologyTutorPage() {
         const savedUserRaw = localStorage.getItem('biology-tutor-user');
         if (savedUserRaw) {
           setUser(JSON.parse(savedUserRaw));
+        }
+
+        const savedUsageRaw = localStorage.getItem('biology-tutor-daily-usage');
+        if (savedUsageRaw) {
+          setDailyUsageMap(JSON.parse(savedUsageRaw));
         }
 
         const savedPapersRaw = localStorage.getItem(
@@ -97,6 +109,15 @@ export default function BiologyTutorPage() {
     } catch {
       // Ignore
     }
+  };
+
+  const handleQuickGoogleSignIn = () => {
+    const googleUser: StudentUser = {
+      email: 'hamzamousa26072011@gmail.com',
+      name: 'Hamza Mousa',
+      provider: 'google',
+    };
+    handleSignIn(googleUser);
   };
 
   const handleSignOut = () => {
@@ -142,8 +163,18 @@ export default function BiologyTutorPage() {
     return [ocrJoined, markSchemeManualText].filter(Boolean).join('\n').trim();
   };
 
-  // Grade Question handler
+  // Grade Question handler (Enforces Sign-In & 10 Questions/Day Per User)
   const handleGradeSubmission = async () => {
+    if (!user) {
+      setIsSignInOpen(true);
+      return;
+    }
+
+    const quotaCheck = canUserGradeQuestion(dailyUsageMap, user.email);
+    if (!quotaCheck.allowed) {
+      return;
+    }
+
     const combinedStudent = getCombinedStudentAnswer();
     const combinedScheme = getCombinedMarkScheme();
 
@@ -170,13 +201,27 @@ export default function BiologyTutorPage() {
       const resultData: GradingResult = await res.json();
       setGradingResult(resultData);
 
-      // Initialize the In-Tab Question Examiner Chat with a helpful summary message
+      // Increment user's daily question count (max 10 per day)
+      setDailyUsageMap((prev) => {
+        const updated = incrementDailyQuestionUsage(prev, user.email);
+        try {
+          localStorage.setItem(
+            'biology-tutor-daily-usage',
+            JSON.stringify(updated)
+          );
+        } catch {
+          // Ignore
+        }
+        return updated;
+      });
+
+      // Initialize the In-Tab Question Examiner Chat with a helpful summary message (without letter grade)
       setExaminerMessages([
         {
           id: `examiner-init-${Date.now()}`,
           role: 'assistant',
           content: `### Question Graded: ${resultData.questionTitle}
-- You scored **${resultData.awardedMarks} / ${resultData.totalMarks} marks** (**${resultData.percentage}%**, Grade **${resultData.grade}**).
+- You scored **${resultData.awardedMarks} / ${resultData.totalMarks} marks** (**${resultData.percentage}%**).
 - Ask me anything below about why specific marks were awarded or lost, whether alternative wording would be accepted, or how the **Cambridge 0610 Marking Principles** apply to your answer.`,
           timestamp: new Date().toLocaleTimeString([], {
             hour: '2-digit',
@@ -185,40 +230,37 @@ export default function BiologyTutorPage() {
         },
       ]);
 
-      // Automatically save to student's account history in localStorage if signed in
-      if (user) {
-        const newPaper: SavedPaper = {
-          id: `paper-${Date.now()}`,
-          title: resultData.questionTitle || 'Cambridge 0610 Graded Question',
-          createdAt: new Date().toLocaleDateString('en-GB', {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
-          studentEmail: user.email,
-          studentAnswerText:
-            resultData.transcribedStudentAnswer || combinedStudent,
-          markSchemeText:
-            resultData.transcribedMarkScheme || combinedScheme,
-          questionPrompt: questionPromptText,
-          result: resultData,
-        };
+      // Automatically save to student's account history in localStorage
+      const newPaper: SavedPaper = {
+        id: `paper-${Date.now()}`,
+        title: resultData.questionTitle || 'Cambridge 0610 Graded Question',
+        createdAt: new Date().toLocaleDateString('en-GB', {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        studentEmail: user.email,
+        studentAnswerText:
+          resultData.transcribedStudentAnswer || combinedStudent,
+        markSchemeText: resultData.transcribedMarkScheme || combinedScheme,
+        questionPrompt: questionPromptText,
+        result: resultData,
+      };
 
-        setSavedPapers((prev) => {
-          const updated = [newPaper, ...prev];
-          try {
-            localStorage.setItem(
-              'biology-tutor-saved-papers',
-              JSON.stringify(updated)
-            );
-          } catch {
-            // Ignore
-          }
-          return updated;
-        });
-      }
+      setSavedPapers((prev) => {
+        const updated = [newPaper, ...prev];
+        try {
+          localStorage.setItem(
+            'biology-tutor-saved-papers',
+            JSON.stringify(updated)
+          );
+        } catch {
+          // Ignore
+        }
+        return updated;
+      });
     } catch (error) {
       console.error('Failed to grade submission:', error);
     } finally {
@@ -241,7 +283,7 @@ export default function BiologyTutorPage() {
       {
         id: `examiner-restored-${Date.now()}`,
         role: 'assistant',
-        content: `### Restored Submission: ${paper.title}\n- Score: **${paper.result.awardedMarks} / ${paper.result.totalMarks} marks** (**${paper.result.percentage}%**, Grade **${paper.result.grade}**). Ask any follow-up question below.`,
+        content: `### Restored Submission: ${paper.title}\n- Score: **${paper.result.awardedMarks} / ${paper.result.totalMarks} marks** (**${paper.result.percentage}%**). Ask any follow-up question below.`,
         timestamp: 'Restored',
       },
     ]);
@@ -289,7 +331,8 @@ export default function BiologyTutorPage() {
           question,
           result: gradingResult,
           studentAnswer:
-            gradingResult.transcribedStudentAnswer || getCombinedStudentAnswer(),
+            gradingResult.transcribedStudentAnswer ||
+            getCombinedStudentAnswer(),
           markScheme:
             gradingResult.transcribedMarkScheme || getCombinedMarkScheme(),
           history: nextHistory.map((m) => ({
@@ -419,13 +462,12 @@ export default function BiologyTutorPage() {
   const userSavedPapers = user
     ? savedPapers.filter((p) => p.studentEmail === user.email)
     : savedPapers;
+  const dailyUsedCount = getDailyQuestionsUsed(dailyUsageMap, user?.email);
 
   return (
     <div
       className={`relative min-h-dvh w-full overflow-x-hidden transition-colors duration-300 ${
-        isDark
-          ? 'bg-[#06050b] text-white'
-          : 'bg-[#F8F6F1] text-[#1C1917]'
+        isDark ? 'bg-[#06050b] text-white' : 'bg-[#F8F6F1] text-[#1C1917]'
       }`}
     >
       {/* Ambient Theme Background Layers */}
@@ -486,6 +528,11 @@ export default function BiologyTutorPage() {
               onSendExaminerMessage={handleSendExaminerMessage}
               onResetExaminerChat={handleResetExaminerChat}
               isExaminerTyping={isExaminerTyping}
+              user={user}
+              onOpenSignIn={() => setIsSignInOpen(true)}
+              onQuickGoogleSignIn={handleQuickGoogleSignIn}
+              dailyUsedCount={dailyUsedCount}
+              maxDailyQuestions={MAX_DAILY_QUESTIONS}
               isDark={isDark}
             />
           ) : (
@@ -508,6 +555,7 @@ export default function BiologyTutorPage() {
         user={user}
         onSignIn={handleSignIn}
         onSignOut={handleSignOut}
+        dailyUsedCount={dailyUsedCount}
         isDark={isDark}
       />
 

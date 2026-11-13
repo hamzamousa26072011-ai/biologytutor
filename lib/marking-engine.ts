@@ -59,6 +59,95 @@ export interface SavedPaper {
 export interface StudentUser {
   email: string;
   name?: string;
+  provider?: 'email' | 'google';
+}
+
+export const MAX_DAILY_QUESTIONS = 10;
+
+/**
+ * Returns a local YYYY-MM-DD date key for tracking daily per-user question limits.
+ */
+export function getTodayDateKey(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function getUserDailyUsageKey(
+  email: string,
+  dateKey: string = getTodayDateKey()
+): string {
+  return `${email.trim().toLowerCase()}__${dateKey}`;
+}
+
+export function getDailyQuestionsUsed(
+  usageMap: Record<string, number>,
+  email?: string | null,
+  dateKey: string = getTodayDateKey()
+): number {
+  if (!email || !email.trim()) return 0;
+  const key = getUserDailyUsageKey(email, dateKey);
+  const raw = usageMap[key] ?? 0;
+  return Math.max(0, Math.floor(raw));
+}
+
+export function getRemainingDailyQuestions(
+  usageMap: Record<string, number>,
+  email?: string | null,
+  dateKey: string = getTodayDateKey()
+): number {
+  const used = getDailyQuestionsUsed(usageMap, email, dateKey);
+  return Math.max(0, MAX_DAILY_QUESTIONS - used);
+}
+
+export function canUserGradeQuestion(
+  usageMap: Record<string, number>,
+  email?: string | null,
+  dateKey: string = getTodayDateKey()
+): {
+  allowed: boolean;
+  used: number;
+  remaining: number;
+  reason?: string;
+} {
+  if (!email || !email.trim()) {
+    return {
+      allowed: false,
+      used: 0,
+      remaining: 0,
+      reason: 'Please sign in to use Paper Correction (10 questions per day).',
+    };
+  }
+  const used = getDailyQuestionsUsed(usageMap, email, dateKey);
+  const remaining = Math.max(0, MAX_DAILY_QUESTIONS - used);
+  if (used >= MAX_DAILY_QUESTIONS) {
+    return {
+      allowed: false,
+      used,
+      remaining: 0,
+      reason: `You have reached your daily limit of ${MAX_DAILY_QUESTIONS} questions today. Your allowance resets tomorrow.`,
+    };
+  }
+  return {
+    allowed: true,
+    used,
+    remaining,
+  };
+}
+
+export function incrementDailyQuestionUsage(
+  usageMap: Record<string, number>,
+  email: string,
+  dateKey: string = getTodayDateKey()
+): Record<string, number> {
+  if (!email || !email.trim()) return usageMap;
+  const key = getUserDailyUsageKey(email, dateKey);
+  const current = getDailyQuestionsUsed(usageMap, email, dateKey);
+  return {
+    ...usageMap,
+    [key]: current + 1,
+  };
 }
 
 export interface ChatMessage {
@@ -400,7 +489,7 @@ export function gradeSubmissionDeterministic(params: {
   const examinerSummary =
     marksLost === 0
       ? `Excellent response! You achieved full marks (${awardedMarks}/${totalMarks}) by hitting every required Cambridge 0610 marking point${unitRuleTriggered ? ' (Critical Unit Rule applied: full accuracy credit awarded without penalizing pre-printed units)' : ''}.`
-      : `You scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%, Grade ${grade}). Review the ${marksLost} missed marking point${marksLost === 1 ? '' : 's'} below to ensure all underlined Cambridge Biology keywords are included.`;
+      : `You scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%). Review the ${marksLost} missed marking point${marksLost === 1 ? '' : 's'} below to ensure all underlined Cambridge Biology keywords are included.`;
 
   const howToEarnFullMarksSummary =
     marksLost === 0

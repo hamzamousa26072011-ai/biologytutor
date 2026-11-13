@@ -22,16 +22,21 @@ export async function POST(req: NextRequest) {
 
     const prompt =
       targetType === 'markscheme'
-        ? `You are a Cambridge IGCSE Biology (0610) OCR transcriber.
-Analyze this Official Mark Scheme image/document and transcribe ALL text verbatim and completely.
-- Include every question number/sub-part, every rubric point, mark allocation ([B1], [M1], [A1], [C1], [1], etc.), underlined keywords, "Accept", "Allow", "Reject", "Ignore", "ORA", "ECF", and total marks (e.g. Total: [3] or max [X]).
-- Also note if any unit is printed on the answer line.
-Return ONLY the exact transcribed mark scheme text without commentary.`
-        : `You are a Cambridge IGCSE Biology (0610) OCR transcriber.
-Analyze this Student's Answer exam page image/document and transcribe ALL text verbatim and completely.
-- If the printed question prompt, diagram labels, or printed answer line (including any pre-printed unit such as "........... beats / min" or "........... %") is visible on the page, transcribe it clearly as "Question Prompt / Answer Line: ...".
-- Transcribe all of the student's handwritten or typed answers, calculations, and annotations word-for-word as "Student's Answer: ...".
-Return ONLY the exact transcribed text without commentary.`;
+        ? `You are a Senior Cambridge IGCSE Biology (0610) Official Mark Scheme OCR Engine.
+Examine this Official Mark Scheme image/document line-by-line and column-by-column, and transcribe ALL text verbatim with 100% precision:
+1. Extract every row of the 4-column Cambridge Mark Scheme table:
+   - Column 1 (Question): Exact question and sub-question numbers (e.g. 1(a)(i), 1(a)(ii), 1(b)).
+   - Column 2 (Answer): Every marking point separated by semicolons (;), preserving all underlined or bolded keywords (write underlined keywords in **bold**), chemical equations, numerical values, and alternative wording separated by "/" or "OR".
+   - Column 3 (Marks): Exact integer mark allocation for each part and sub-part (e.g. [1], [2], [3], Total: [X]).
+   - Column 4 (Guidance): Every examiner instruction including Accept (A), Allow, Ignore (I), Reject (R), ORA (or reverse argument), ECF (error carried forward), AVP (any valid point), and "max [X]".
+2. Explicitly note if any unit is already printed on the answer line.
+Return ONLY the complete, structured verbatim transcription without commentary.`
+        : `You are a Senior Cambridge IGCSE Biology (0610) Handwriting & Exam Script OCR Engine.
+Examine this Student's Answer exam page image/document line-by-line and transcribe ALL visible printed and handwritten text with 100% precision:
+1. Printed Question Context: Transcribe every visible question number, sub-question label (e.g. 1(a)(i), (b)), printed question stem, diagram/graph axes and labels, table headers, and the exact printed answer line including any pre-printed unit (such as "........... %", "........... beats / min", "........... dm³", "........... arbitrary units") under "Question Prompt / Answer Line:".
+2. Student's Handwritten / Typed Response: Carefully decipher cursive, slanted, faint pencil, or dark pen handwriting line-by-line. Transcribe every word, biological term, symbol, arrow, table entry, and mathematical working/calculation under "Student's Answer:".
+3. Crossed-Out Text Rule: Ignore words or lines that the student has clearly struck through or crossed out, and transcribe only their intended final words verbatim (do NOT auto-correct their biological misconceptions so the examiner can grade their exact wording).
+Return ONLY the complete verbatim transcription without commentary.`;
 
     const response = await generateContentWithFallback({
       contents: [

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import {
   Camera,
   Upload,
@@ -19,11 +19,15 @@ import {
   ShieldCheck,
   Award,
   Keyboard,
+  Lock,
+  LogIn,
+  Chrome,
 } from 'lucide-react';
 import {
   ChatMessage,
   GradingResult,
   PageItem,
+  StudentUser,
 } from '@/lib/marking-engine';
 import { FormattedContent } from './FormattedContent';
 
@@ -49,7 +53,70 @@ interface CheckingQuestionsTabProps {
   onSendExaminerMessage: (question: string) => void;
   onResetExaminerChat: () => void;
   isExaminerTyping: boolean;
+  user: StudentUser | null;
+  onOpenSignIn: () => void;
+  onQuickGoogleSignIn: () => void;
+  dailyUsedCount: number;
+  maxDailyQuestions: number;
   isDark: boolean;
+}
+
+/**
+ * Enhances uploaded exam images on the client using an offscreen canvas
+ * to boost handwriting/table contrast and preserve high resolution for OCR.
+ */
+async function enhanceImageForOcr(
+  file: File
+): Promise<{ dataUrl: string; mimeType: string }> {
+  const rawDataUrl = await new Promise<string>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.readAsDataURL(file);
+  });
+
+  if (!file.type.startsWith('image/')) {
+    return { dataUrl: rawDataUrl, mimeType: file.type || 'application/pdf' };
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const maxDim = 2200;
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
+
+        if (width > maxDim || height > maxDim) {
+          const scale = maxDim / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' });
+          return;
+        }
+
+        // Fill white background for transparent PNGs and boost contrast for faint pencil/pen handwriting
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
+        ctx.filter = 'contrast(1.18) brightness(1.02)';
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const enhancedDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+        resolve({ dataUrl: enhancedDataUrl, mimeType: 'image/jpeg' });
+      } catch {
+        resolve({ dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' });
+      }
+    };
+    img.onerror = () =>
+      resolve({ dataUrl: rawDataUrl, mimeType: file.type || 'image/jpeg' });
+    img.src = rawDataUrl;
+  });
 }
 
 export function CheckingQuestionsTab({
@@ -74,22 +141,50 @@ export function CheckingQuestionsTab({
   onSendExaminerMessage,
   onResetExaminerChat,
   isExaminerTyping,
+  user,
+  onOpenSignIn,
+  onQuickGoogleSignIn,
+  dailyUsedCount,
+  maxDailyQuestions,
   isDark,
 }: CheckingQuestionsTabProps) {
   const studentCameraRef = useRef<HTMLInputElement>(null);
   const studentUploadRef = useRef<HTMLInputElement>(null);
   const schemeCameraRef = useRef<HTMLInputElement>(null);
   const schemeUploadRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const examinerLastMsgRef = useRef<HTMLDivElement>(null);
 
   const [copiedModelAnswer, setCopiedModelAnswer] = useState(false);
   const [examinerInput, setExaminerInput] = useState('');
 
-  // Stage uploaded pages immediately; full OCR extraction runs when the student clicks Start Marking
+  const remainingQuestions = Math.max(0, maxDailyQuestions - dailyUsedCount);
+  const isDailyLimitReached = Boolean(user && remainingQuestions <= 0);
+
+  // Automatically scroll directly to the generated answer section as soon as grading finishes
+  useEffect(() => {
+    if (gradingResult && !isGrading) {
+      const timer = setTimeout(() => {
+        resultsRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      }, 80);
+      return () => clearTimeout(timer);
+    }
+  }, [gradingResult, isGrading]);
+
+  // Enhance uploaded pages for high-clarity OCR and start background OCR extraction immediately
   const handleFilesSelected = async (
     files: FileList | null,
     targetType: 'student' | 'markscheme'
   ) => {
     if (!files || files.length === 0) return;
+    if (!user) {
+      onOpenSignIn();
+      return;
+    }
+
     const setter =
       targetType === 'student' ? setStudentPages : setMarkSchemePages;
 
@@ -100,19 +195,15 @@ export function CheckingQuestionsTab({
         .toString(36)
         .slice(2, 7)}`;
 
-      const dataUrl = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.readAsDataURL(file);
-      });
+      const { dataUrl, mimeType } = await enhanceImageForOcr(file);
 
       const newPage: PageItem = {
         id,
         pageNumber: 1,
         fileName: file.name,
-        mimeType: file.type || 'image/jpeg',
+        mimeType,
         dataUrl,
-        ocrStatus: 'done',
+        ocrStatus: 'processing',
         ocrText: '',
       };
 
@@ -123,6 +214,39 @@ export function CheckingQuestionsTab({
         }));
         return updated;
       });
+
+      // Run background OCR immediately so transcription is pre-extracted and ready
+      fetch('/api/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataUrl,
+          mimeType,
+          targetType,
+          fileName: file.name,
+        }),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          setter((prev) =>
+            prev.map((item) =>
+              item.id === id
+                ? {
+                    ...item,
+                    ocrStatus: 'done',
+                    ocrText: typeof data?.text === 'string' ? data.text : '',
+                  }
+                : item
+            )
+          );
+        })
+        .catch(() => {
+          setter((prev) =>
+            prev.map((item) =>
+              item.id === id ? { ...item, ocrStatus: 'done' } : item
+            )
+          );
+        });
     }
   };
 
@@ -167,10 +291,10 @@ export function CheckingQuestionsTab({
     markSchemePages.some((p) => p.ocrStatus === 'processing');
 
   return (
-    <div className="mx-auto w-full max-w-7xl min-w-0 space-y-6 overflow-hidden px-3 py-5 sm:px-6 sm:py-7">
-      {/* Top Banner: Paper Correction */}
+    <div className="mx-auto w-full max-w-7xl min-w-0 space-y-5 overflow-hidden px-3 py-4 sm:space-y-6 sm:px-6 sm:py-7">
+      {/* Top Banner: Paper Correction + Daily 10-Question Allowance Status */}
       <div
-        className={`flex min-w-0 flex-col justify-between gap-2 overflow-hidden rounded-2xl border p-4 sm:flex-row sm:items-center ${
+        className={`flex min-w-0 flex-col justify-between gap-3 overflow-hidden rounded-2xl border p-4 sm:flex-row sm:items-center ${
           isDark
             ? 'border-purple-500/30 bg-[#0e0b18]/80 shadow-[0_0_30px_rgba(139,92,246,0.12)]'
             : 'border-[#E7E0D6] bg-white shadow-xs'
@@ -192,13 +316,112 @@ export function CheckingQuestionsTab({
               isDark ? 'text-slate-300' : 'text-[#57534E]'
             }`}
           >
-            Auto-detects total marks from your Mark Scheme • Whole marks only • Enforces Cambridge Unit & Keyword Principles
+            Enhanced Handwriting &amp; Table OCR • Whole marks only • Enforces Cambridge Unit &amp; Keyword Principles
           </p>
+        </div>
+
+        {/* Daily Question Quota Badge / Sign-In Prompt */}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {user ? (
+            <div
+              className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 font-mono text-xs font-bold ${
+                remainingQuestions > 0
+                  ? isDark
+                    ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-300'
+                    : 'border-[#2D6A4F]/30 bg-[#EAF2EC] text-[#2D6A4F]'
+                  : isDark
+                  ? 'border-rose-500/40 bg-rose-950/60 text-rose-300'
+                  : 'border-rose-300 bg-rose-50 text-rose-700'
+              }`}
+            >
+              <Sparkles className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                {remainingQuestions} / {maxDailyQuestions} questions left today
+              </span>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onOpenSignIn}
+              className={`flex min-h-[38px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-bold transition-all ${
+                isDark
+                  ? 'border-amber-400/40 bg-amber-950/50 text-amber-200 hover:bg-amber-900/60'
+                  : 'border-[#C85A32]/40 bg-[#C85A32]/10 text-[#9C3814] hover:bg-[#C85A32]/20'
+              }`}
+            >
+              <Lock className="h-3.5 w-3.5 shrink-0" />
+              <span>Sign in required • 10 questions/day</span>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Two Clean Side-by-Side Input Cards (Stacked on Mobile) */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {/* Sign-In Required Notice Banner when user is not signed in */}
+      {!user && (
+        <div
+          className={`flex flex-col justify-between gap-4 rounded-2xl border p-4 sm:p-5 md:flex-row md:items-center ${
+            isDark
+              ? 'border-purple-400/45 bg-gradient-to-r from-purple-950/70 via-[#0e0b18] to-fuchsia-950/60 shadow-[0_0_25px_rgba(168,85,247,0.18)]'
+              : 'border-[#C85A32]/35 bg-[#F8F6F1] shadow-xs'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <div
+              className={`mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border ${
+                isDark
+                  ? 'border-purple-400/40 bg-purple-900/50 text-purple-200'
+                  : 'border-[#C85A32]/30 bg-[#C85A32]/15 text-[#9C3814]'
+              }`}
+            >
+              <Lock className="h-5 w-5" />
+            </div>
+            <div className="space-y-1">
+              <h2 className="text-sm font-bold sm:text-base">
+                Sign in required to use Paper Correction
+              </h2>
+              <p
+                className={`text-xs sm:text-sm ${
+                  isDark ? 'text-slate-300' : 'text-[#57534E]'
+                }`}
+              >
+                Please sign in with Google or your student email to upload and mark exam papers. Each signed-in student receives{' '}
+                <span className="font-bold">10 questions per day</span> and automatic Saved Papers history.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={onQuickGoogleSignIn}
+              className={`flex min-h-[44px] flex-1 sm:flex-initial items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-xs sm:text-sm font-bold transition-all active:scale-[0.99] ${
+                isDark
+                  ? 'border-white/30 bg-white text-[#1C1917] shadow-sm hover:bg-slate-100'
+                  : 'border-[#1C1917]/20 bg-[#1C1917] text-white hover:bg-[#292524]'
+              }`}
+            >
+              <Chrome className="h-4 w-4 shrink-0 text-blue-500" />
+              <span>Sign in with Google</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenSignIn}
+              className={`flex min-h-[44px] flex-1 sm:flex-initial items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-xs sm:text-sm font-bold text-white transition-all active:scale-[0.99] ${
+                isDark
+                  ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 shadow-[0_0_18px_rgba(168,85,247,0.4)] hover:brightness-110'
+                  : 'bg-[#C85A32] hover:bg-[#9C3814]'
+              }`}
+            >
+              <LogIn className="h-4 w-4 shrink-0" />
+              <span>Student Sign In</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Two Clean Side-by-Side Input Cards on Tablet (md:) & Desktop (Stacked on Mobile) */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {/* Card 1: Student's Answer */}
         <section
           aria-label="Student's Answer Card"
@@ -263,8 +486,14 @@ export function CheckingQuestionsTab({
 
                 <button
                   type="button"
-                  onClick={() => studentCameraRef.current?.click()}
-                  className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${
+                  onClick={() => {
+                    if (!user) {
+                      onOpenSignIn();
+                      return;
+                    }
+                    studentCameraRef.current?.click();
+                  }}
+                  className={`flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all active:scale-[0.98] ${
                     isDark
                       ? 'border-purple-500/35 bg-purple-950/60 text-purple-200 hover:bg-purple-900/70'
                       : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#1C1917] hover:bg-[#EFECE6]'
@@ -276,8 +505,14 @@ export function CheckingQuestionsTab({
 
                 <button
                   type="button"
-                  onClick={() => studentUploadRef.current?.click()}
-                  className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${
+                  onClick={() => {
+                    if (!user) {
+                      onOpenSignIn();
+                      return;
+                    }
+                    studentUploadRef.current?.click();
+                  }}
+                  className={`flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all active:scale-[0.98] ${
                     isDark
                       ? 'border-purple-500/35 bg-purple-950/60 text-purple-200 hover:bg-purple-900/70'
                       : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#1C1917] hover:bg-[#EFECE6]'
@@ -292,15 +527,25 @@ export function CheckingQuestionsTab({
             {/* Compact Dashed Tap-Zone (Default Clean State) */}
             {studentPages.length === 0 ? (
               <div
-                onClick={() => studentUploadRef.current?.click()}
+                onClick={() => {
+                  if (!user) {
+                    onOpenSignIn();
+                    return;
+                  }
+                  studentUploadRef.current?.click();
+                }}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
+                    if (!user) {
+                      onOpenSignIn();
+                      return;
+                    }
                     studentUploadRef.current?.click();
                   }
                 }}
-                className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-6 text-center transition-all ${
+                className={`group flex min-h-[132px] cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-6 text-center transition-all ${
                   isDark
                     ? 'border-purple-500/30 bg-[#06050b]/40 hover:border-purple-400/60 hover:bg-purple-950/25'
                     : 'border-[#E7E0D6] bg-[#F8F6F1]/60 hover:border-[#C85A32]/60 hover:bg-[#F8F6F1]'
@@ -323,7 +568,7 @@ export function CheckingQuestionsTab({
                     isDark ? 'text-slate-400' : 'text-[#57534E]'
                   }`}
                 >
-                  Supports multi-page photos & PDFs • Instant background OCR
+                  High-contrast handwriting OCR • Multi-page photos &amp; PDFs
                 </p>
               </div>
             ) : (
@@ -361,7 +606,7 @@ export function CheckingQuestionsTab({
                           className={`h-2 w-2 rounded-full ${
                             isDark ? 'bg-emerald-400' : 'bg-[#2D6A4F]'
                           }`}
-                          title="Background OCR Ready"
+                          title="Enhanced OCR Ready"
                         />
                       )}
                     </div>
@@ -396,8 +641,14 @@ export function CheckingQuestionsTab({
             <div className="mt-2.5 flex items-center justify-between">
               <button
                 type="button"
-                onClick={() => setShowStudentTextBox(!showStudentTextBox)}
-                className={`inline-flex items-center gap-1.5 text-xs font-medium underline-offset-4 hover:underline ${
+                onClick={() => {
+                  if (!user) {
+                    onOpenSignIn();
+                    return;
+                  }
+                  setShowStudentTextBox(!showStudentTextBox);
+                }}
+                className={`inline-flex min-h-[36px] items-center gap-1.5 text-xs font-medium underline-offset-4 hover:underline ${
                   isDark ? 'text-purple-300/90' : 'text-[#9C3814]'
                 }`}
               >
@@ -415,8 +666,8 @@ export function CheckingQuestionsTab({
                   }`}
                 >
                   {isOcrBusy
-                    ? 'Scanning pages in background...'
-                    : `${studentPages.length} page(s) ready`}
+                    ? 'Enhancing & scanning OCR...'
+                    : `${studentPages.length} page(s) OCR ready`}
                 </span>
               )}
             </div>
@@ -428,7 +679,7 @@ export function CheckingQuestionsTab({
                   value={questionPromptText}
                   onChange={(e) => setQuestionPromptText(e.target.value)}
                   placeholder="Optional question prompt / printed answer line (e.g. Answer line: ........... %)"
-                  className={`w-full rounded-xl border px-3 py-2 text-base sm:text-xs focus:outline-none ${
+                  className={`w-full rounded-xl border px-3 py-2.5 text-base sm:text-xs focus:outline-none ${
                     isDark
                       ? 'border-purple-500/30 bg-[#06050b] text-white placeholder-slate-500 focus:border-purple-400'
                       : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#1C1917] placeholder-stone-400 focus:border-[#C85A32]'
@@ -481,7 +732,7 @@ export function CheckingQuestionsTab({
                       isDark ? 'text-slate-400' : 'text-[#57534E]'
                     }`}
                   >
-                    Cambridge 0610 rubric points & auto mark detection
+                    Cambridge 0610 rubric points &amp; auto mark detection
                   </p>
                 </div>
               </div>
@@ -514,8 +765,14 @@ export function CheckingQuestionsTab({
 
                 <button
                   type="button"
-                  onClick={() => schemeCameraRef.current?.click()}
-                  className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${
+                  onClick={() => {
+                    if (!user) {
+                      onOpenSignIn();
+                      return;
+                    }
+                    schemeCameraRef.current?.click();
+                  }}
+                  className={`flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all active:scale-[0.98] ${
                     isDark
                       ? 'border-purple-500/35 bg-purple-950/60 text-purple-200 hover:bg-purple-900/70'
                       : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#1C1917] hover:bg-[#EFECE6]'
@@ -527,8 +784,14 @@ export function CheckingQuestionsTab({
 
                 <button
                   type="button"
-                  onClick={() => schemeUploadRef.current?.click()}
-                  className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all ${
+                  onClick={() => {
+                    if (!user) {
+                      onOpenSignIn();
+                      return;
+                    }
+                    schemeUploadRef.current?.click();
+                  }}
+                  className={`flex min-h-[40px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all active:scale-[0.98] ${
                     isDark
                       ? 'border-purple-500/35 bg-purple-950/60 text-purple-200 hover:bg-purple-900/70'
                       : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#1C1917] hover:bg-[#EFECE6]'
@@ -543,15 +806,25 @@ export function CheckingQuestionsTab({
             {/* Compact Dashed Tap-Zone (Default Clean State) */}
             {markSchemePages.length === 0 ? (
               <div
-                onClick={() => schemeUploadRef.current?.click()}
+                onClick={() => {
+                  if (!user) {
+                    onOpenSignIn();
+                    return;
+                  }
+                  schemeUploadRef.current?.click();
+                }}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
+                    if (!user) {
+                      onOpenSignIn();
+                      return;
+                    }
                     schemeUploadRef.current?.click();
                   }
                 }}
-                className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-6 text-center transition-all ${
+                className={`group flex min-h-[132px] cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-6 text-center transition-all ${
                   isDark
                     ? 'border-purple-500/30 bg-[#06050b]/40 hover:border-purple-400/60 hover:bg-purple-950/25'
                     : 'border-[#E7E0D6] bg-[#F8F6F1]/60 hover:border-[#C85A32]/60 hover:bg-[#F8F6F1]'
@@ -574,7 +847,7 @@ export function CheckingQuestionsTab({
                     isDark ? 'text-slate-400' : 'text-[#57534E]'
                   }`}
                 >
-                  Auto-detects total marks & rubric points in background
+                  4-column Cambridge table OCR &amp; auto mark detection
                 </p>
               </div>
             ) : (
@@ -612,7 +885,7 @@ export function CheckingQuestionsTab({
                           className={`h-2 w-2 rounded-full ${
                             isDark ? 'bg-emerald-400' : 'bg-[#2D6A4F]'
                           }`}
-                          title="Background OCR Ready"
+                          title="Enhanced OCR Ready"
                         />
                       )}
                     </div>
@@ -647,8 +920,14 @@ export function CheckingQuestionsTab({
             <div className="mt-2.5 flex items-center justify-between">
               <button
                 type="button"
-                onClick={() => setShowMarkSchemeTextBox(!showMarkSchemeTextBox)}
-                className={`inline-flex items-center gap-1.5 text-xs font-medium underline-offset-4 hover:underline ${
+                onClick={() => {
+                  if (!user) {
+                    onOpenSignIn();
+                    return;
+                  }
+                  setShowMarkSchemeTextBox(!showMarkSchemeTextBox);
+                }}
+                className={`inline-flex min-h-[36px] items-center gap-1.5 text-xs font-medium underline-offset-4 hover:underline ${
                   isDark ? 'text-purple-300/90' : 'text-[#9C3814]'
                 }`}
               >
@@ -666,8 +945,8 @@ export function CheckingQuestionsTab({
                   }`}
                 >
                   {isOcrBusy
-                    ? 'Scanning rubric in background...'
-                    : `${markSchemePages.length} page(s) ready`}
+                    ? 'Enhancing & scanning rubric...'
+                    : `${markSchemePages.length} page(s) OCR ready`}
                 </span>
               )}
             </div>
@@ -691,111 +970,128 @@ export function CheckingQuestionsTab({
         </section>
       </div>
 
-      {/* Primary Action Button: Start Marking */}
-      <div className="flex flex-col items-center justify-center pt-1">
-        <button
-          type="button"
-          disabled={isGrading || (!hasStudentInput && !hasSchemeInput)}
-          onClick={onGradeSubmission}
-          className={`flex w-full max-w-md items-center justify-center gap-2 rounded-xl px-6 py-3.5 text-sm font-bold text-white transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
-            isDark
-              ? 'bg-gradient-to-r from-purple-600 via-fuchsia-600 to-purple-600 shadow-[0_0_25px_rgba(168,85,247,0.45)] hover:brightness-110'
-              : 'bg-[#C85A32] shadow-md hover:bg-[#9C3814]'
-          }`}
-        >
-          {isGrading ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span>Marking...</span>
-            </>
-          ) : (
-            <>
-              <Sparkles className="h-4 w-4" />
-              <span>Start Marking</span>
-            </>
-          )}
-        </button>
+      {/* Primary Action Button: Start Marking (Enforces Sign-In & 10 Questions/Day Limit) */}
+      <div className="flex flex-col items-center justify-center gap-2 pt-1">
+        {!user ? (
+          <button
+            type="button"
+            onClick={onOpenSignIn}
+            className={`flex min-h-[48px] w-full max-w-md items-center justify-center gap-2 rounded-xl px-6 py-3.5 text-sm font-bold text-white transition-all active:scale-[0.99] ${
+              isDark
+                ? 'bg-gradient-to-r from-purple-600 via-fuchsia-600 to-purple-600 shadow-[0_0_25px_rgba(168,85,247,0.45)] hover:brightness-110'
+                : 'bg-[#C85A32] shadow-md hover:bg-[#9C3814]'
+            }`}
+          >
+            <Lock className="h-4 w-4" />
+            <span>Sign In to Start Marking (10 Questions/Day)</span>
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={
+                isGrading ||
+                isDailyLimitReached ||
+                (!hasStudentInput && !hasSchemeInput)
+              }
+              onClick={onGradeSubmission}
+              className={`flex min-h-[48px] w-full max-w-md items-center justify-center gap-2 rounded-xl px-6 py-3.5 text-sm font-bold text-white transition-all active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50 ${
+                isDark
+                  ? 'bg-gradient-to-r from-purple-600 via-fuchsia-600 to-purple-600 shadow-[0_0_25px_rgba(168,85,247,0.45)] hover:brightness-110'
+                  : 'bg-[#C85A32] shadow-md hover:bg-[#9C3814]'
+              }`}
+            >
+              {isGrading ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Marking...</span>
+                </>
+              ) : isDailyLimitReached ? (
+                <>
+                  <Lock className="h-4 w-4" />
+                  <span>Daily Limit Reached (10/10 Used Today)</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-4 w-4" />
+                  <span>Start Marking</span>
+                </>
+              )}
+            </button>
+
+            <p
+              className={`text-center font-mono text-xs ${
+                isDailyLimitReached
+                  ? 'font-semibold text-rose-400'
+                  : isDark
+                  ? 'text-slate-400'
+                  : 'text-[#57534E]'
+              }`}
+            >
+              {isDailyLimitReached
+                ? `You have used all ${maxDailyQuestions} questions for today (${user.email}). Your daily limit resets tomorrow.`
+                : `Signed in as ${user.name || user.email} • ${remainingQuestions} of ${maxDailyQuestions} questions left today`}
+            </p>
+          </>
+        )}
       </div>
 
       {/* ===================================================================== */}
-      {/* RESULTS SECTION (Displayed Directly Underneath the Input Cards)       */}
+      {/* RESULTS SECTION (Auto-Scrolled Directly Into View When Generated)      */}
       {/* ===================================================================== */}
       {gradingResult && (
         <div
           id="grading-results-section"
-          className="space-y-5 pt-2 animate-in fade-in duration-300"
+          ref={resultsRef}
+          className="scroll-mt-28 sm:scroll-mt-24 space-y-5 pt-2 animate-in fade-in duration-300"
         >
-          {/* 1. Question Grade & Score Bar */}
+          {/* 1. Question Score Bar (Grade Removed as Requested; Shows Marks & Percentage) */}
           <div
-            className={`rounded-2xl border p-5 ${
+            className={`rounded-2xl border p-4 sm:p-5 ${
               isDark
                 ? 'border-purple-500/40 bg-[#0e0b18]/90 shadow-[0_0_35px_rgba(139,92,246,0.2)]'
                 : 'border-[#E7E0D6] bg-white shadow-sm'
             }`}
           >
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
-              <div className="flex items-center gap-4">
-                {/* Large Grade Badge */}
-                <div
-                  className={`flex h-16 w-16 shrink-0 flex-col items-center justify-center rounded-2xl border font-mono text-2xl font-black ${
-                    gradingResult.percentage >= 80
-                      ? isDark
-                        ? 'border-emerald-400/50 bg-emerald-950/70 text-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.3)]'
+              <div className="space-y-1.5 min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base font-extrabold sm:text-lg">
+                    {gradingResult.questionTitle}
+                  </h2>
+                  {/* Percentage Badge */}
+                  <span
+                    className={`rounded-md px-2.5 py-0.5 font-mono text-xs font-bold ${
+                      isDark
+                        ? 'border border-purple-400/40 bg-purple-900/50 text-purple-200'
                         : 'border border-[#2D6A4F]/30 bg-[#EAF2EC] text-[#2D6A4F]'
-                      : gradingResult.percentage >= 60
-                      ? isDark
-                        ? 'border-purple-400/50 bg-purple-950/70 text-purple-200'
-                        : 'border-amber-500/40 bg-amber-50 text-amber-800'
-                      : isDark
-                      ? 'border-rose-500/50 bg-rose-950/70 text-rose-300'
-                      : 'border-rose-300 bg-rose-50 text-rose-700'
-                  }`}
-                >
-                  <span>{gradingResult.grade}</span>
-                  <span className="text-[10px] font-semibold uppercase opacity-80">
-                    Grade
+                    }`}
+                  >
+                    {gradingResult.percentage}%
                   </span>
-                </div>
-
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="text-base font-extrabold sm:text-lg">
-                      {gradingResult.questionTitle}
-                    </h2>
-                    {/* Percentage Badge */}
+                  {gradingResult.unitRuleApplied && (
                     <span
-                      className={`rounded-md px-2 py-0.5 font-mono text-xs font-bold ${
+                      className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold ${
                         isDark
-                          ? 'border border-purple-400/40 bg-purple-900/50 text-purple-200'
+                          ? 'border border-emerald-400/40 bg-emerald-950/60 text-emerald-300'
                           : 'border border-[#2D6A4F]/30 bg-[#EAF2EC] text-[#2D6A4F]'
                       }`}
                     >
-                      {gradingResult.percentage}%
+                      ✓ Cambridge Unit Rule Protected
                     </span>
-                    {gradingResult.unitRuleApplied && (
-                      <span
-                        className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold ${
-                          isDark
-                            ? 'border border-emerald-400/40 bg-emerald-950/60 text-emerald-300'
-                            : 'border border-[#2D6A4F]/30 bg-[#EAF2EC] text-[#2D6A4F]'
-                        }`}
-                      >
-                        ✓ Cambridge Unit Rule Protected
-                      </span>
-                    )}
-                  </div>
-                  <p
-                    className={`text-xs sm:text-sm ${
-                      isDark ? 'text-slate-300' : 'text-[#57534E]'
-                    }`}
-                  >
-                    {gradingResult.examinerSummary}
-                  </p>
+                  )}
                 </div>
+                <p
+                  className={`text-xs sm:text-sm ${
+                    isDark ? 'text-slate-300' : 'text-[#57534E]'
+                  }`}
+                >
+                  {gradingResult.examinerSummary}
+                </p>
               </div>
 
               {/* Awarded Marks (X / Y) & Marks Lost (-Z) */}
-              <div className="flex items-center gap-3 self-start md:self-center">
+              <div className="flex items-center gap-3 self-start md:self-center shrink-0">
                 <div
                   className={`rounded-xl border px-3.5 py-2 text-center ${
                     isDark
@@ -835,13 +1131,13 @@ export function CheckingQuestionsTab({
 
           {/* 2. Answer Comparison Against the Mark Scheme */}
           <div
-            className={`rounded-2xl border p-5 ${
+            className={`rounded-2xl border p-4 sm:p-5 ${
               isDark
                 ? 'border-purple-500/30 bg-[#0e0b18]/80'
                 : 'border-[#E7E0D6] bg-white shadow-xs'
             }`}
           >
-            <div className="mb-3.5 flex items-center justify-between">
+            <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <Award
                   className={`h-4 w-4 ${
@@ -941,7 +1237,7 @@ export function CheckingQuestionsTab({
           {gradingResult.marksLost > 0 &&
             gradingResult.lostMarksBreakdown.length > 0 && (
               <div
-                className={`rounded-2xl border p-5 ${
+                className={`rounded-2xl border p-4 sm:p-5 ${
                   isDark
                     ? 'border-rose-500/35 bg-[#0e0b18]/85'
                     : 'border-rose-200 bg-white shadow-xs'
@@ -1040,7 +1336,7 @@ export function CheckingQuestionsTab({
 
           {/* 4. How to Earn Full Marks & Corrected Version (100% Full Marks) */}
           <div
-            className={`rounded-2xl border p-5 ${
+            className={`rounded-2xl border p-4 sm:p-5 ${
               isDark
                 ? 'border-emerald-500/35 bg-[#0e0b18]/85'
                 : 'border-[#2D6A4F]/30 bg-white shadow-xs'
@@ -1061,7 +1357,7 @@ export function CheckingQuestionsTab({
               <button
                 type="button"
                 onClick={handleCopyCorrected}
-                className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
+                className={`flex min-h-[38px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
                   isDark
                     ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-200 hover:bg-emerald-900/60'
                     : 'border-[#2D6A4F]/30 bg-[#EAF2EC] text-[#2D6A4F] hover:bg-[#d8e8dc]'
@@ -1126,7 +1422,7 @@ export function CheckingQuestionsTab({
 
           {/* 5. In-Tab "Chat with Question Examiner" (Check Tab Only) */}
           <div
-            className={`rounded-2xl border p-5 ${
+            className={`rounded-2xl border p-4 sm:p-5 ${
               isDark
                 ? 'border-purple-500/40 bg-[#0e0b18]/90'
                 : 'border-[#E7E0D6] bg-white shadow-xs'
@@ -1149,7 +1445,7 @@ export function CheckingQuestionsTab({
               <button
                 type="button"
                 onClick={onResetExaminerChat}
-                className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
+                className={`flex min-h-[38px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
                   isDark
                     ? 'border-purple-500/35 bg-purple-950/50 text-purple-200 hover:bg-purple-900/60'
                     : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#9C3814] hover:bg-[#EFECE6]'
@@ -1171,7 +1467,7 @@ export function CheckingQuestionsTab({
                   key={i}
                   type="button"
                   onClick={() => onSendExaminerMessage(promptText)}
-                  className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`min-h-[36px] shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                     isDark
                       ? 'border-purple-500/25 bg-[#06050b] text-purple-200 hover:border-purple-400'
                       : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#1C1917] hover:border-[#C85A32]'
@@ -1184,28 +1480,34 @@ export function CheckingQuestionsTab({
 
             {/* Examiner Conversation Messages */}
             <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
-              {examinerMessages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`rounded-xl border p-3.5 ${
-                    msg.role === 'user'
-                      ? isDark
-                        ? 'ml-auto max-w-xl border-purple-400/40 bg-purple-950/60 text-white'
-                        : 'ml-auto max-w-xl border-[#C85A32]/30 bg-[#C85A32]/10 text-[#1C1917]'
-                      : isDark
-                      ? 'border-purple-500/25 bg-[#06050b]/90'
-                      : 'border-[#E7E0D6] bg-[#F8F6F1]'
-                  }`}
-                >
-                  <div className="mb-1 flex items-center justify-between text-[10px] font-mono uppercase opacity-70">
-                    <span>
-                      {msg.role === 'user' ? 'Student' : '0610 Question Examiner'}
-                    </span>
-                    <span>{msg.timestamp}</span>
+              {examinerMessages.map((msg, idx) => {
+                const isLast = idx === examinerMessages.length - 1;
+                return (
+                  <div
+                    key={msg.id}
+                    ref={isLast ? examinerLastMsgRef : undefined}
+                    className={`rounded-xl border p-3.5 ${
+                      msg.role === 'user'
+                        ? isDark
+                          ? 'ml-auto max-w-xl border-purple-400/40 bg-purple-950/60 text-white'
+                          : 'ml-auto max-w-xl border-[#C85A32]/30 bg-[#C85A32]/10 text-[#1C1917]'
+                        : isDark
+                        ? 'border-purple-500/25 bg-[#06050b]/90'
+                        : 'border-[#E7E0D6] bg-[#F8F6F1]'
+                    }`}
+                  >
+                    <div className="mb-1 flex items-center justify-between text-[10px] font-mono uppercase opacity-70">
+                      <span>
+                        {msg.role === 'user'
+                          ? 'Student'
+                          : '0610 Question Examiner'}
+                      </span>
+                      <span>{msg.timestamp}</span>
+                    </div>
+                    <FormattedContent content={msg.content} isDark={isDark} />
                   </div>
-                  <FormattedContent content={msg.content} isDark={isDark} />
-                </div>
-              ))}
+                );
+              })}
               {isExaminerTyping && (
                 <div
                   className={`flex items-center gap-2 rounded-xl border p-3 text-xs ${
@@ -1227,7 +1529,7 @@ export function CheckingQuestionsTab({
                 value={examinerInput}
                 onChange={(e) => setExaminerInput(e.target.value)}
                 placeholder="Ask the Question Examiner about your answer or rubric..."
-                className={`flex-1 rounded-xl border px-3.5 py-2.5 text-base sm:text-sm focus:outline-none ${
+                className={`min-h-[44px] flex-1 rounded-xl border px-3.5 py-2.5 text-base sm:text-sm focus:outline-none ${
                   isDark
                     ? 'border-purple-500/35 bg-[#06050b] text-white placeholder-slate-500 focus:border-purple-400'
                     : 'border-[#E7E0D6] bg-[#F8F6F1] text-[#1C1917] placeholder-stone-400 focus:border-[#C85A32]'
@@ -1236,7 +1538,7 @@ export function CheckingQuestionsTab({
               <button
                 type="submit"
                 disabled={!examinerInput.trim() || isExaminerTyping}
-                className={`flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-bold text-white transition-all disabled:opacity-50 ${
+                className={`flex min-h-[44px] items-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-bold text-white transition-all disabled:opacity-50 ${
                   isDark
                     ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:brightness-110'
                     : 'bg-[#C85A32] hover:bg-[#9C3814]'
