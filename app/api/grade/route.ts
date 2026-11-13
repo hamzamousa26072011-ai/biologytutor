@@ -1,441 +1,232 @@
-import { Type } from '@google/genai';
 import { NextRequest, NextResponse } from 'next/server';
+import { Type, Part } from '@google/genai';
 import {
-  calculateCambridgeGrade,
-  detectTotalMarksFromScheme,
-  gradeSubmissionDeterministic,
-  hasUnitInPromptOrAnswerLine,
   GradingResult,
+  gradeSubmissionDeterministic,
+  stripMarkdown,
 } from '@/lib/marking-engine';
-import { searchBiologyNotes } from '@/lib/biology-notes-kb';
-import { generateContentWithFallback } from '@/lib/gemini-server';
+import {
+  GEMINI_MODEL,
+  UploadedPageInput,
+  buildMediaParts,
+  getGeminiServerClient,
+} from '@/lib/gemini-server';
 
-export const dynamic = 'force-dynamic';
-
-async function transcribeStudentPagesDeep(
-  studentPages: Array<{ dataUrl: string; mimeType: string }>
-): Promise<string> {
-  const validPages = studentPages.filter((p) => p.dataUrl && p.dataUrl.includes(','));
-  if (validPages.length === 0) return '';
-
-  const parts: Array<
-    | { text: string }
-    | { inlineData: { mimeType: string; data: string } }
-  > = [];
-
-  validPages.forEach((p, idx) => {
-    parts.push({
-      text: `=== STUDENT ANSWER PAGE ${idx + 1} OF ${validPages.length} ===`,
-    });
-    parts.push({
-      inlineData: {
-        mimeType: p.mimeType || 'image/jpeg',
-        data: p.dataUrl.split(',')[1],
-      },
-    });
-  });
-
-  parts.push({
-    text: `You are a Senior Cambridge IGCSE Biology (0610) Handwriting & Exam Script OCR Specialist.
-Carefully inspect every page of the Student's Answer above and perform a high-precision, line-by-line transcription:
-1. PRINTED QUESTION & ANSWER LINE: Transcribe every visible question number, sub-part label (e.g. 1(a)(i), (b)(ii)), printed question stem, diagram/graph labels, table headers, and any pre-printed unit on the answer line (such as "........... %", "........... beats / min", "........... µm", "........... arbitrary units").
-2. HANDWRITING DECIPHERING: Carefully read cursive, slanted, small, or faint pencil/pen handwriting line-by-line. Transcribe every single word, biological term, chemical symbol, arrow, table entry, and mathematical working/fraction written by the student.
-3. CROSSED-OUT & MARGIN TEXT: Ignore words or lines that the student clearly struck through/crossed out. Include valid handwritten continuations written below the lines or in margins (marked with arrows or asterisks). Do NOT auto-correct the student's biological errors—preserve their exact wording verbatim so it can be graded accurately.
-4. Organize the transcription clearly page-by-page and sub-question by sub-question.
-Return ONLY the complete verbatim transcription.`,
-  });
-
-  const res = await generateContentWithFallback({
-    contents: [{ role: 'user', parts }],
-  });
-
-  return res?.text?.trim() || '';
-}
-
-async function transcribeMarkSchemePagesDeep(
-  markSchemePages: Array<{ dataUrl: string; mimeType: string }>
-): Promise<string> {
-  const validPages = markSchemePages.filter((p) => p.dataUrl && p.dataUrl.includes(','));
-  if (validPages.length === 0) return '';
-
-  const parts: Array<
-    | { text: string }
-    | { inlineData: { mimeType: string; data: string } }
-  > = [];
-
-  validPages.forEach((p, idx) => {
-    parts.push({
-      text: `=== OFFICIAL MARK SCHEME PAGE ${idx + 1} OF ${validPages.length} ===`,
-    });
-    parts.push({
-      inlineData: {
-        mimeType: p.mimeType || 'image/jpeg',
-        data: p.dataUrl.split(',')[1],
-      },
-    });
-  });
-
-  parts.push({
-    text: `You are a Senior Cambridge IGCSE Biology (0610) Official Mark Scheme OCR Specialist.
-Carefully inspect every page of the Official Mark Scheme above and transcribe ALL text and table rows with 100% precision:
-1. 4-COLUMN TABLE EXTRACTION: Read every row across all four Cambridge Mark Scheme columns:
-   - Question (e.g. 1(a)(i), 1(b))
-   - Answer / Marking Points
-   - Marks (exact integer mark allocation per part and Total/Max marks)
-   - Guidance / Additional Notes
-2. SEMICOLONS & RUBRIC CODES: Preserve every single semicolon (;) separating individual marking points, every rubric code ([B1], [M1], [A1], [C1], [1]), and all alternative "/" or "OR" phrasing.
-3. UNDERLINED KEYWORDS & EXAMINER RULES: Preserve all underlined or bolded syllabus keywords and all Guidance notes including "Accept" (A), "Allow", "Reject" (R), "Ignore" (I), "ORA" (or reverse argument), "ECF" (error carried forward), "AVP" (any valid point), and "max [X]".
-Return ONLY the complete verbatim transcription of the mark scheme.`,
-  });
-
-  const res = await generateContentWithFallback({
-    contents: [{ role: 'user', parts }],
-  });
-
-  return res?.text?.trim() || '';
+interface GradeRequestBody {
+  studentAnswer?: string;
+  markScheme?: string;
+  studentPages?: UploadedPageInput[];
+  markSchemePages?: UploadedPageInput[];
 }
 
 export async function POST(req: NextRequest) {
-  let studentAnswer = '';
-  let markScheme = '';
-  let questionPrompt = '';
-
   try {
-    const body = await req.json();
-    const {
-      studentAnswer: rawStudentAnswer = '',
-      markScheme: rawMarkScheme = '',
-      questionPrompt: rawQuestionPrompt = '',
-      studentPages = [],
-      markSchemePages = [],
-    } = body as {
-      studentAnswer: string;
-      markScheme: string;
-      questionPrompt?: string;
-      studentPages?: Array<{ dataUrl: string; mimeType: string }>;
-      markSchemePages?: Array<{ dataUrl: string; mimeType: string }>;
-    };
+    const body = (await req.json()) as GradeRequestBody;
+    const studentText = (body.studentAnswer || '').trim();
+    const markSchemeText = (body.markScheme || '').trim();
+    const studentPages = Array.isArray(body.studentPages) ? body.studentPages : [];
+    const markSchemePages = Array.isArray(body.markSchemePages) ? body.markSchemePages : [];
 
-    const typedStudentText = rawStudentAnswer
-      .replace(/Page ready for multimodal grading\.?/gi, '')
-      .replace(/Transcribed page content ready for Cambridge 0610 evaluation\.?/gi, '')
-      .trim();
-    const typedSchemeText = rawMarkScheme
-      .replace(/Page ready for multimodal grading\.?/gi, '')
-      .replace(/Transcribed page content ready for Cambridge 0610 evaluation\.?/gi, '')
-      .trim();
-    questionPrompt = rawQuestionPrompt.trim();
+    const hasStudentInput = studentText.length > 0 || studentPages.length > 0;
+    const hasMarkSchemeInput = markSchemeText.length > 0 || markSchemePages.length > 0;
 
-    // STAGE 1: When the student clicks "Start Marking", perform dedicated deep OCR on all uploaded pictures
-    const [ocrStudentText, ocrSchemeText] = await Promise.all([
-      transcribeStudentPagesDeep(studentPages),
-      transcribeMarkSchemePagesDeep(markSchemePages),
-    ]);
+    if (!hasStudentInput || !hasMarkSchemeInput) {
+      return NextResponse.json(
+        { error: 'Please provide both a Student Answer and an Official Mark Scheme.' },
+        { status: 400 }
+      );
+    }
 
-    studentAnswer = [ocrStudentText, typedStudentText].filter(Boolean).join('\n\n').trim();
-    markScheme = [ocrSchemeText, typedSchemeText].filter(Boolean).join('\n\n').trim();
+    const ai = getGeminiServerClient();
+    const usedOcr = studentPages.length > 0 || markSchemePages.length > 0;
 
-    const unitAlreadyPrinted = hasUnitInPromptOrAnswerLine(questionPrompt, `${studentAnswer}\n${markScheme}`);
-    const { matches } = searchBiologyNotes(`${questionPrompt} ${markScheme} ${studentAnswer}`);
-    const syllabusContext = matches
-      .slice(0, 3)
-      .map((m) => `Topic: ${m.title}\n${m.content}`)
-      .join('\n\n');
-
-    const parts: Array<
-      | { text: string }
-      | { inlineData: { mimeType: string; data: string } }
-    > = [];
-
-    // Also include all original Student Answer and Mark Scheme images for direct visual verification during grading
-    studentPages.forEach((p, idx) => {
-      if (p.dataUrl && p.dataUrl.includes(',')) {
-        parts.push({
-          text: `=== STUDENT'S ANSWER PICTURE (PAGE ${idx + 1} OF ${studentPages.length}) ===`,
+    if (!ai) {
+      if (usedOcr && (!studentText || !markSchemeText)) {
+        const fallbackStudent =
+          studentText || '[Uploaded student handwritten/PDF answer pages pending server OCR key]';
+        const fallbackScheme =
+          markSchemeText || '[Uploaded mark scheme pages pending server OCR key]';
+        const deterministic = gradeSubmissionDeterministic(fallbackStudent, fallbackScheme, {
+          usedOcr,
+          studentFileCount: studentPages.length,
+          markSchemeFileCount: markSchemePages.length,
         });
-        parts.push({
-          inlineData: {
-            mimeType: p.mimeType || 'image/jpeg',
-            data: p.dataUrl.split(',')[1],
-          },
-        });
+        return NextResponse.json({ result: deterministic, engine: 'deterministic' });
       }
+
+      const deterministic = gradeSubmissionDeterministic(studentText, markSchemeText, {
+        usedOcr,
+        studentFileCount: studentPages.length,
+        markSchemeFileCount: markSchemePages.length,
+      });
+      return NextResponse.json({ result: deterministic, engine: 'deterministic' });
+    }
+
+    const parts: Part[] = [];
+
+    if (studentPages.length > 0) {
+      parts.push({ text: '=== STUDENT ANSWER PAGES (TRANSCRIBE ACCURATELY FIRST) ===' });
+      parts.push(...buildMediaParts(studentPages));
+    }
+    if (studentText) {
+      parts.push({ text: `=== STUDENT ANSWER TYPED/PASTED TEXT ===\n${studentText}` });
+    }
+
+    if (markSchemePages.length > 0) {
+      parts.push({ text: '=== OFFICIAL CAMBRIDGE 0610 MARK SCHEME PAGES ===' });
+      parts.push(...buildMediaParts(markSchemePages));
+    }
+    if (markSchemeText) {
+      parts.push({ text: `=== OFFICIAL CAMBRIDGE 0610 MARK SCHEME TEXT ===\n${markSchemeText}` });
+    }
+
+    parts.push({
+      text: `You are an expert Cambridge IGCSE Biology (0610) Chief Examiner with enhanced handwriting & exam-paper OCR capability.
+
+TASKS:
+1. OCR & Transcription: Carefully transcribe any uploaded student handwriting, tables, labels, biological equations, and units (e.g. µm, mm, cm³, °C, %) without dropping decimals or subscripts. Also transcribe any uploaded Official Mark Scheme pages completely.
+2. Auto-detect total marks: Read bracketed totals [Total: N], [max N], or individual [1] marking points from the mark scheme.
+3. Strict Cambridge 0610 Marking Rules:
+   - WHOLE MARKS ONLY (integers only, never 0.5).
+   - Critical Unit Rule: If a calculation or quantitative point requires a unit and the student omits or writes the wrong unit, withhold that mark and set criticalUnitDeducted = true.
+   - Contradiction Rule (CON): If the student gives a correct statement alongside a contradicting incorrect biological statement, award 0 for that point and set contradictionTriggered = true.
+   - Error Carried Forward (ECF): Apply standard Cambridge ECF for multi-step calculations if method is shown clearly.
+4. DO NOT include any letter grade (such as Grade A*, A, B, C, etc.) anywhere in examinerSummary or correctedVersion.
+5. Return clean prose (no raw markdown hashes or asterisks).`,
     });
 
-    markSchemePages.forEach((p, idx) => {
-      if (p.dataUrl && p.dataUrl.includes(',')) {
-        parts.push({
-          text: `=== OFFICIAL MARK SCHEME PICTURE (PAGE ${idx + 1} OF ${markSchemePages.length}) ===`,
-        });
-        parts.push({
-          inlineData: {
-            mimeType: p.mimeType || 'image/jpeg',
-            data: p.dataUrl.split(',')[1],
-          },
-        });
-      }
-    });
-
-    const promptText = `You are a Senior Cambridge IGCSE Biology (0610) Examiner.
-Follow this exact Paper Correction workflow using both the extracted OCR transcriptions below and the attached page images:
-
-STEP 1 — VERIFY FULL TRANSCRIPTIONS:
-- Review the extracted OCR transcription of the Student's Answer and the Official Mark Scheme below against the attached images to ensure not a single handwritten word, number, or mark scheme point was missed.
-- Store the finalized full transcriptions in "transcribedStudentAnswer" and "transcribedMarkScheme" for system records.
-- If no mark scheme picture or text was provided, derive the official Cambridge IGCSE Biology (0610) mark scheme points for the question from the Student's Answer page and the Cambridge 0610 Syllabus Notes below.
-
-STEP 2 — COMPARE THE STUDENT'S ANSWER AGAINST THE MARK SCHEME:
-- Compare the student's transcribed answer against each point of the transcribed mark scheme.
-- Strictly enforce Cambridge IGCSE 0610 Marking Principles:
-  1. WHOLE MARKS ONLY: Never award half marks (0.5) or fractions. Every rubric point is an integer mark (e.g. 1 or 0).
-  2. POSITIVE MARKING: Award marks for valid biological points present that match the mark scheme; do not deduct for omissions.
-  3. CONTEXT & KEYWORDS: Underlined or required Cambridge Biology keywords must be used in accurate scientific context.
-  4. CONTRADICTIONS (CON): Contradictory statements in the same part cancel credit for that point.
-  5. ERROR CARRIED FORWARD (ECF): Award subsequent marks if an earlier incorrect numerical value is used correctly in a subsequent step.
-  6. RUBRIC CODES: Label each point with its Cambridge rubric code ([B1], [M1], [A1], [C1]).
-  7. CRITICAL UNIT RULE: If the unit is already included in the question prompt or printed on the question paper answer line (e.g., "........... %", "........... beats / min", or unitPrePrinted=${unitAlreadyPrinted}), DO NOT subtract any marks if the student only writes the numerical value. Award the full [A1] accuracy mark!
-
-STEP 3 — GIVE THE FINAL GRADE & COMPARISON SUMMARY:
-- Auto-detect the exact integer "totalMarks" available from the mark scheme and calculate the exact integer "awardedMarks" earned by the student.
-- In "examinerSummary", write a clear comparison of what the student got right and where marks were lost.
-
-STEP 4 — SHOW ALL MISTAKES BELOW ("lostMarksBreakdown"):
-- For every mark lost or missed rubric point, include an entry in "lostMarksBreakdown" detailing:
-  - "rubricCode": The missed rubric point code (e.g. "[B1]")
-  - "whatWasWrong": Exactly what was wrong, inaccurate, or missing in the student's actual answer
-  - "whyMarkDeducted": Why the mark could not be awarded according to the Official Mark Scheme and Cambridge 0610 rules
-  - "howToEarnFullMarks": Specific instruction on what the student must write or change to earn this mark
-
-STEP 5 — EXPLAIN HOW TO EARN FULL MARKS & PROVIDE FULL-MARK MODEL ANSWER:
-- In "howToEarnFullMarksSummary", clearly explain step-by-step how the student can improve their answer to earn 100% full marks on this question.
-- In "correctedVersion", provide the complete 100% full-mark model answer written in crisp Cambridge IGCSE 0610 prose.
-- NEVER use generic preset messages like "Valid Cambridge 0610 biological point" and NEVER mention internal file names or author names.
-
-QUESTION PROMPT CONTEXT (if provided):
-${questionPrompt || '(Extracted from student answer / mark scheme pages)'}
-
-EXTRACTED OCR TRANSCRIPTION OF STUDENT'S ANSWER:
-${studentAnswer || '(Inspect attached STUDENT\'S ANSWER PICTURE pages)'}
-
-EXTRACTED OCR TRANSCRIPTION OF OFFICIAL MARK SCHEME:
-${markScheme || '(Inspect attached OFFICIAL MARK SCHEME PICTURE pages)'}
-
-RELEVANT CAMBRIDGE 0610 SYLLABUS NOTES:
-${syllabusContext}`;
-
-    parts.push({ text: promptText });
-
-    const response = await generateContentWithFallback({
-      contents: [{ role: 'user', parts }],
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: { parts },
       config: {
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            questionTitle: {
-              type: Type.STRING,
-              description: 'Specific Cambridge 0610 question topic and number analyzed from the pictures/text',
-            },
-            transcribedStudentAnswer: {
-              type: Type.STRING,
-              description: 'Complete transcription of all text from the Student Answer pictures/text (kept in system)',
-            },
-            transcribedMarkScheme: {
-              type: Type.STRING,
-              description: 'Complete transcription of all text and rubric points from the Official Mark Scheme pictures/text (kept in system)',
-            },
-            totalMarks: {
-              type: Type.INTEGER,
-              description: 'Total available whole marks auto-detected from the mark scheme',
-            },
-            awardedMarks: {
-              type: Type.INTEGER,
-              description: 'Total whole marks awarded to the student after comparing against the mark scheme',
-            },
-            examinerSummary: {
-              type: Type.STRING,
-              description: 'Detailed comparison summary of the student answer against the mark scheme',
-            },
-            unitRuleApplied: {
-              type: Type.BOOLEAN,
-              description: 'True if the Critical Unit Rule was applied (unit already on prompt/answer line)',
-            },
-            howToEarnFullMarksSummary: {
-              type: Type.STRING,
-              description: 'Clear step-by-step explanation of how the student can earn full marks on this question',
-            },
-            rubricPoints: {
+            extractedStudentAnswer: { type: Type.STRING },
+            extractedMarkScheme: { type: Type.STRING },
+            awardedMarks: { type: Type.INTEGER },
+            totalMarks: { type: Type.INTEGER },
+            criticalUnitDeducted: { type: Type.BOOLEAN },
+            contradictionTriggered: { type: Type.BOOLEAN },
+            rubricBreakdown: {
               type: Type.ARRAY,
               items: {
                 type: Type.OBJECT,
                 properties: {
-                  code: {
-                    type: Type.STRING,
-                    description: 'Rubric code such as [B1], [M1], [A1], [C1]',
-                  },
-                  description: {
-                    type: Type.STRING,
-                    description: 'Exact requirement from the transcribed mark scheme point',
-                  },
-                  satisfied: {
-                    type: Type.BOOLEAN,
-                    description: 'True if student earned this mark',
-                  },
-                  marksAwarded: {
-                    type: Type.INTEGER,
-                    description: 'Whole marks awarded for this point (1 or 0)',
-                  },
-                  maxMarks: {
-                    type: Type.INTEGER,
-                    description: 'Maximum marks for this point (usually 1)',
-                  },
-                  examinerNote: {
-                    type: Type.STRING,
-                    description: 'Comparison of what the student wrote versus what this mark scheme point required',
-                  },
+                  code: { type: Type.STRING },
+                  criterion: { type: Type.STRING },
+                  maxMarks: { type: Type.INTEGER },
+                  awardedMarks: { type: Type.INTEGER },
+                  status: { type: Type.STRING },
+                  studentEvidence: { type: Type.STRING },
+                  examinerNote: { type: Type.STRING },
                 },
                 required: [
                   'code',
-                  'description',
-                  'satisfied',
-                  'marksAwarded',
+                  'criterion',
                   'maxMarks',
+                  'awardedMarks',
+                  'status',
+                  'studentEvidence',
                   'examinerNote',
                 ],
               },
             },
-            lostMarksBreakdown: {
+            examinerSummary: { type: Type.STRING },
+            correctedVersion: { type: Type.STRING },
+            missingKeywords: {
               type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  rubricCode: { type: Type.STRING },
-                  whatWasWrong: { type: Type.STRING },
-                  whyMarkDeducted: { type: Type.STRING },
-                  howToEarnFullMarks: { type: Type.STRING },
-                },
-                required: [
-                  'rubricCode',
-                  'whatWasWrong',
-                  'whyMarkDeducted',
-                  'howToEarnFullMarks',
-                ],
-              },
+              items: { type: Type.STRING },
             },
-            correctedVersion: {
-              type: Type.STRING,
-              description: 'Complete 100% full-mark model answer based on the mark scheme',
-            },
+            examinerTip: { type: Type.STRING },
           },
           required: [
-            'questionTitle',
-            'transcribedStudentAnswer',
-            'transcribedMarkScheme',
-            'totalMarks',
+            'extractedStudentAnswer',
+            'extractedMarkScheme',
             'awardedMarks',
+            'totalMarks',
+            'criticalUnitDeducted',
+            'contradictionTriggered',
+            'rubricBreakdown',
             'examinerSummary',
-            'unitRuleApplied',
-            'howToEarnFullMarksSummary',
-            'rubricPoints',
-            'lostMarksBreakdown',
             'correctedVersion',
+            'missingKeywords',
+            'examinerTip',
           ],
         },
       },
     });
 
-    if (!response || !response.text) {
-      const deterministicResult = gradeSubmissionDeterministic({
-        studentAnswer,
-        markScheme,
-        questionPrompt,
-      });
-      return NextResponse.json(deterministicResult);
+    const rawJson = response.text;
+    if (!rawJson) {
+      throw new Error('Empty model response');
     }
 
-    const parsed = JSON.parse(response.text);
-    const effectiveStudentText =
-      parsed.transcribedStudentAnswer?.trim() || studentAnswer;
-    const effectiveSchemeText =
-      parsed.transcribedMarkScheme?.trim() || markScheme;
+    const parsed = JSON.parse(rawJson) as Partial<GradingResult>;
+    const breakdown = Array.isArray(parsed.rubricBreakdown)
+      ? parsed.rubricBreakdown.map((pt, i) => ({
+          code: pt.code || `M${i + 1}`,
+          criterion: stripMarkdown(pt.criterion || 'Marking point'),
+          maxMarks: Math.max(1, Math.round(Number(pt.maxMarks || 1))),
+          awardedMarks: Math.max(0, Math.round(Number(pt.awardedMarks || 0))),
+          status:
+            pt.status === 'awarded' || pt.status === 'contradicted'
+              ? pt.status
+              : ('missed' as const),
+          studentEvidence: stripMarkdown(pt.studentEvidence || ''),
+          examinerNote: stripMarkdown(pt.examinerNote || ''),
+        }))
+      : [];
 
-    const detectedTotal = detectTotalMarksFromScheme(effectiveSchemeText);
-    const totalMarks = Math.max(1, Math.round(parsed.totalMarks || detectedTotal));
+    const totalMarks = Math.max(1, Math.round(Number(parsed.totalMarks || breakdown.length || 1)));
     const awardedMarks = Math.max(
       0,
-      Math.min(totalMarks, Math.round(parsed.awardedMarks ?? 0))
+      Math.min(totalMarks, Math.round(Number(parsed.awardedMarks ?? 0)))
     );
-    const marksLost = Math.max(0, totalMarks - awardedMarks);
-    const { grade, percentage } = calculateCambridgeGrade(awardedMarks, totalMarks);
+    const percentage = Math.round((awardedMarks / totalMarks) * 100);
 
-    const rubricPoints =
-      Array.isArray(parsed.rubricPoints) && parsed.rubricPoints.length > 0
-        ? parsed.rubricPoints.map((rp: any) => ({
-            code: rp.code?.startsWith('[') ? rp.code : `[${rp.code || 'B1'}]`,
-            description: rp.description || '',
-            satisfied: Boolean(rp.satisfied),
-            marksAwarded: rp.satisfied ? Math.max(1, Math.round(rp.marksAwarded || 1)) : 0,
-            maxMarks: Math.max(1, Math.round(rp.maxMarks || 1)),
-            examinerNote: rp.examinerNote || '',
-          }))
-        : [];
+    const sanitizedSummary = stripMarkdown(parsed.examinerSummary || '')
+      .replace(/\bGrade\s*[:=-]?\s*[A-G*U]\b\.?/gi, '')
+      .trim();
 
-    const lostMarksBreakdown =
-      marksLost === 0
-        ? []
-        : Array.isArray(parsed.lostMarksBreakdown) && parsed.lostMarksBreakdown.length > 0
-        ? parsed.lostMarksBreakdown
-        : rubricPoints
-            .filter((rp: any) => !rp.satisfied)
-            .map((rp: any) => ({
-              rubricCode: rp.code,
-              whatWasWrong: rp.examinerNote || `Your answer missed or did not accurately state: "${rp.description}".`,
-              whyMarkDeducted: `The Official Mark Scheme requires this specific point (${rp.code}: ${rp.description}) for credit.`,
-              howToEarnFullMarks: `Explicitly include "${rp.description}" using accurate Cambridge IGCSE 0610 biological terminology.`,
-            }));
-
-    const cleanExaminerSummary = (
-      parsed.examinerSummary ||
-      `You scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%).`
-    ).replace(/,?\s*Grade\s+[A-U]\*?/gi, '');
-
-    const finalResult: GradingResult = {
-      questionTitle: parsed.questionTitle || 'Cambridge IGCSE 0610 Paper Correction',
-      grade,
-      percentage,
+    const result: GradingResult = {
       awardedMarks,
       totalMarks,
-      marksLost,
-      examinerSummary: cleanExaminerSummary,
-      unitRuleApplied: Boolean(
-        parsed.unitRuleApplied ||
-          hasUnitInPromptOrAnswerLine(effectiveStudentText, effectiveSchemeText)
+      percentage,
+      criticalUnitDeducted: Boolean(parsed.criticalUnitDeducted),
+      contradictionTriggered: Boolean(parsed.contradictionTriggered),
+      extractedStudentAnswer: parsed.extractedStudentAnswer || studentText,
+      extractedMarkScheme: parsed.extractedMarkScheme || markSchemeText,
+      rubricBreakdown: breakdown,
+      examinerSummary:
+        sanitizedSummary ||
+        `Scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%) under Cambridge 0610 marking rules.`,
+      correctedVersion: stripMarkdown(parsed.correctedVersion || ''),
+      missingKeywords: Array.isArray(parsed.missingKeywords)
+        ? parsed.missingKeywords.map((k) => stripMarkdown(String(k))).filter(Boolean)
+        : [],
+      examinerTip: stripMarkdown(
+        parsed.examinerTip || 'Use exact Cambridge 0610 terminology and include biological units.'
       ),
-      transcribedStudentAnswer: effectiveStudentText,
-      transcribedMarkScheme: effectiveSchemeText,
-      howToEarnFullMarksSummary:
-        parsed.howToEarnFullMarksSummary ||
-        (marksLost === 0
-          ? 'Your answer satisfied all mark scheme requirements for full marks.'
-          : lostMarksBreakdown
-              .map((item: any, idx: number) => `${idx + 1}. **${item.rubricCode}**: ${item.howToEarnFullMarks}`)
-              .join('\n')),
-      rubricPoints,
-      lostMarksBreakdown,
-      correctedVersion:
-        parsed.correctedVersion ||
-        rubricPoints.map((rp: any) => rp.description).join('. ') + '.',
     };
 
-    return NextResponse.json(finalResult);
+    return NextResponse.json({ result, engine: 'gemini' });
   } catch (error) {
-    console.error('Grade API error:', error);
-    return NextResponse.json(
-      gradeSubmissionDeterministic({
-        studentAnswer,
-        markScheme,
-        questionPrompt,
-      })
-    );
+    console.warn('Grade route fallback triggered:', error);
+    try {
+      const body = (await req.clone().json().catch(() => ({}))) as GradeRequestBody;
+      const fallback = gradeSubmissionDeterministic(
+        body.studentAnswer || '[Uploaded Student Answer]',
+        body.markScheme || '[Uploaded Mark Scheme]',
+        { usedOcr: Boolean(body.studentPages?.length || body.markSchemePages?.length) }
+      );
+      return NextResponse.json({ result: fallback, engine: 'deterministic' });
+    } catch {
+      return NextResponse.json(
+        { error: 'Unable to grade submission right now. Please try again.' },
+        { status: 500 }
+      );
+    }
   }
 }

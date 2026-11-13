@@ -1,107 +1,86 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { ThinkingLevel } from '@google/genai';
 import {
-  answerExaminerChatDeterministic,
   GradingResult,
+  answerExaminerChatDeterministic,
+  stripMarkdown,
 } from '@/lib/marking-engine';
-import { searchBiologyNotes } from '@/lib/biology-notes-kb';
-import { generateContentWithFallback } from '@/lib/gemini-server';
+import { GEMINI_MODEL, getGeminiServerClient } from '@/lib/gemini-server';
 
-export const dynamic = 'force-dynamic';
+interface ExaminerChatRequest {
+  question?: string;
+  gradingResult?: GradingResult;
+  studentAnswer?: string;
+  markScheme?: string;
+}
 
 export async function POST(req: NextRequest) {
-  let question = '';
-  let fallbackResult: GradingResult | null = null;
-  let studentAnswer = '';
-  let markScheme = '';
-
+  let body: ExaminerChatRequest = {};
   try {
-    const body = await req.json();
-    question = body.question || '';
-    fallbackResult = body.result;
-    studentAnswer =
-      body.studentAnswer || fallbackResult?.transcribedStudentAnswer || '';
-    markScheme =
-      body.markScheme || fallbackResult?.transcribedMarkScheme || '';
-    const history: Array<{ role: 'user' | 'assistant'; content: string }> =
-      body.history || [];
+    body = (await req.json()) as ExaminerChatRequest;
+    const question = (body.question || '').trim();
+    const gradingResult = body.gradingResult;
+    const studentAnswer = body.studentAnswer || '';
+    const markScheme = body.markScheme || '';
 
-    if (!question.trim() || !fallbackResult) {
+    if (!question || !gradingResult) {
       return NextResponse.json(
-        { error: 'Missing question or grading result' },
+        { error: 'Please ask a question after a submission has been marked.' },
         { status: 400 }
       );
     }
 
-    const { matches } = searchBiologyNotes(`${markScheme} ${question}`);
-    const syllabusContext = matches
-      .slice(0, 2)
-      .map((m) => `=== ${m.title} ===\n${m.content}`)
-      .join('\n\n');
-
-    const systemInstruction = `You are the Cambridge IGCSE Biology (0610) Question Examiner.
-You are discussing a specific graded exam question with the student.
-RULES:
-1. Base your explanation strictly on the Official Mark Scheme for this question, the Student's Answer, the Graded Rubric Breakdown, and the Cambridge IGCSE Biology (0610) Course Notes.
-2. Do NOT answer questions outside the Cambridge IGCSE Biology (0610) course notes.
-3. NEVER mention internal file names or author names.
-4. Emphasize Cambridge Marking Principles: Whole marks only, Positive marking, exact Keyword Context, Contradictions (CON), Error Carried Forward (ECF), and the Critical Unit Rule (never penalize missing units if the unit is already printed on the answer line or prompt).
-5. Format clearly with ### headings, bullet points (- ), **bold syllabus terms**, and \`inline codes\`.
-
-GRADED QUESTION CONTEXT:
-- Question Title: ${fallbackResult.questionTitle}
-- Score: ${fallbackResult.awardedMarks} / ${fallbackResult.totalMarks} (${fallbackResult.percentage}%, Grade ${fallbackResult.grade})
-- Transcribed Student's Answer: ${studentAnswer}
-- Transcribed Official Mark Scheme: ${markScheme}
-- Rubric Evaluation: ${JSON.stringify(fallbackResult.rubricPoints)}
-- Mistakes Breakdown: ${JSON.stringify(fallbackResult.lostMarksBreakdown)}
-- Full-Mark Model Answer: ${fallbackResult.correctedVersion}
-
-RELEVANT SYLLABUS NOTES:
-${syllabusContext}`;
-
-    const contents = [
-      ...history.slice(-6).map((msg) => ({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }],
-      })),
-      {
-        role: 'user',
-        parts: [{ text: question }],
-      },
-    ];
-
-    const response = await generateContentWithFallback({
-      contents,
-      config: {
-        systemInstruction,
-      },
-    });
-
-    const reply =
-      response?.text?.trim() ||
-      answerExaminerChatDeterministic(
+    const ai = getGeminiServerClient();
+    if (!ai) {
+      const reply = answerExaminerChatDeterministic(
         question,
-        fallbackResult,
+        gradingResult,
         studentAnswer,
         markScheme
       );
-
-    return NextResponse.json({ reply });
-  } catch (error) {
-    console.error('Examiner chat API fallback:', error);
-    if (fallbackResult) {
-      return NextResponse.json({
-        reply: answerExaminerChatDeterministic(
-          question,
-          fallbackResult,
-          studentAnswer,
-          markScheme
-        ),
-      });
+      return NextResponse.json({ reply, engine: 'deterministic' });
     }
+
+    const prompt = `You are Biology DA7EE7 acting as the Cambridge IGCSE Biology (0610) Examiner reviewing a student's marked question.
+Score: ${gradingResult.awardedMarks}/${gradingResult.totalMarks} (${gradingResult.percentage}%)
+Student Answer: ${studentAnswer}
+Official Mark Scheme: ${markScheme}
+Rubric Breakdown: ${JSON.stringify(gradingResult.rubricBreakdown)}
+Missing Keywords: ${gradingResult.missingKeywords.join(', ')}
+
+Student's follow-up question:
+"${question}"
+
+Explain concisely why specific marks were awarded or withheld using Cambridge 0610 rules (Critical Unit Rule, CON, ECF, whole marks). Do NOT output letter grades (A*-U) and do NOT use raw # or ** markdown characters.`;
+
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
+    });
+
+    const reply = stripMarkdown(response.text || '');
     return NextResponse.json({
       reply:
-        '### Cambridge Examiner Note\n- Focus on including every underlined keyword from the **Official Mark Scheme** in proper biological context.',
+        reply ||
+        answerExaminerChatDeterministic(question, gradingResult, studentAnswer, markScheme),
+      engine: 'gemini',
     });
+  } catch (error) {
+    console.warn('Examiner chat fallback:', error);
+    if (body.gradingResult && body.question) {
+      return NextResponse.json({
+        reply: answerExaminerChatDeterministic(
+          body.question,
+          body.gradingResult,
+          body.studentAnswer || '',
+          body.markScheme || ''
+        ),
+        engine: 'deterministic',
+      });
+    }
+    return NextResponse.json({ error: 'Unable to answer examiner question.' }, { status: 500 });
   }
 }

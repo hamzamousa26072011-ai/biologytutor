@@ -1,11 +1,20 @@
-import { defineConfig } from "eslint/config";
-import next from "eslint-config-next";
+import nextVitals from 'eslint-config-next/core-web-vitals';
+import nextTs from 'eslint-config-next/typescript';
+import firebaseRulesPlugin from '@firebase/eslint-plugin-security-rules';
 
-export default defineConfig([
+const eslintConfig = [
   {
-    ignores: [".next/**", ".next-dev/**", "node_modules/**"],
+    ignores: [
+      'dist/**/*',
+      '.next/**/*',
+      '.next-dev/**/*',
+      'node_modules/**/*',
+      '.playwright-cli/**/*',
+    ],
   },
-  {
-    extends: [...next],
-  },
-]);
+  ...nextVitals,
+  ...nextTs,
+  firebaseRulesPlugin.configs['flat/recommended'],
+];
+
+export default eslintConfig;

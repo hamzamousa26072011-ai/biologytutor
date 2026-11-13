@@ -1,129 +1,96 @@
 'use client';
 
 import React from 'react';
-import { parseFormattedLines, FormattedSegment } from '@/lib/marking-engine';
+import { parseFormattedLines } from '@/lib/marking-engine';
 
 interface FormattedContentProps {
   content: string;
-  isDark: boolean;
   className?: string;
+  isTyping?: boolean;
 }
 
-export function FormattedContent({
+const FormattedContent = React.memo(function FormattedContent({
   content,
-  isDark,
   className = '',
+  isTyping = false,
 }: FormattedContentProps) {
   const lines = parseFormattedLines(content);
 
-  const renderSegments = (segments: FormattedSegment[]) =>
-    segments.map((seg, i) => {
-      if (seg.type === 'bold') {
-        return (
-          <strong
-            key={i}
-            className={
-              isDark
-                ? 'font-semibold text-purple-300'
-                : 'font-semibold text-[#9C3814]'
-            }
-          >
-            {seg.value}
-          </strong>
-        );
-      }
-      if (seg.type === 'code') {
-        return (
-          <code
-            key={i}
-            className={`mx-0.5 rounded px-1.5 py-0.5 font-mono text-[0.85em] font-medium ${
-              isDark
-                ? 'border border-purple-500/30 bg-purple-950/60 text-fuchsia-200'
-                : 'border border-[#E7E0D6] bg-[#F3EFE6] text-[#9C3814]'
-            }`}
-          >
-            {seg.value}
-          </code>
-        );
-      }
-      return <React.Fragment key={i}>{seg.value}</React.Fragment>;
-    });
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const renderTypedText = (text: string, idx: number) => {
+    if (!isTyping || idx !== lines.length - 1 || text.length < 4) {
+      return text;
+    }
+
+    const tailLen = Math.min(16, Math.max(4, Math.floor(text.length * 0.28)));
+    const settled = text.slice(0, text.length - tailLen);
+    const leadingEdge = text.slice(text.length - tailLen);
+
+    return (
+      <>
+        {settled}
+        <span className="bg-gradient-to-r from-stone-800 via-stone-800/75 to-stone-800/15 dark:from-purple-50 dark:via-purple-50/75 dark:to-purple-50/15 bg-clip-text text-transparent">
+          {leadingEdge}
+        </span>
+      </>
+    );
+  };
 
   return (
-    <div className={`space-y-2 leading-relaxed ${className}`}>
+    <div
+      className={`space-y-2.5 text-sm sm:text-[15px] leading-relaxed text-stone-800 dark:text-purple-50/90 ${className}`}
+    >
       {lines.map((line, idx) => {
-        if (line.kind === 'spacer') {
-          return <div key={idx} className="h-1.5" />;
+        if (line.type === 'divider') {
+          return <hr key={idx} className="my-3 border-stone-200 dark:border-purple-500/20" />;
         }
 
-        if (line.kind === 'heading') {
+        if (line.type === 'heading') {
           return (
             <h4
               key={idx}
-              className={`pt-1.5 text-sm font-bold tracking-tight sm:text-base ${
-                isDark ? 'text-purple-200' : 'text-[#9C3814]'
-              }`}
+              className="pt-1.5 text-sm sm:text-base font-semibold tracking-tight text-stone-900 dark:text-fuchsia-200"
             >
-              {renderSegments(line.segments)}
+              {renderTypedText(line.text, idx)}
             </h4>
           );
         }
 
-        if (line.kind === 'bullet') {
+        if (line.type === 'numbered') {
           return (
-            <div key={idx} className="flex items-start gap-2.5 text-sm">
-              <span
-                className={`mt-2 h-1.5 w-1.5 shrink-0 rounded-full ${
-                  isDark
-                    ? 'bg-fuchsia-400 shadow-[0_0_8px_rgba(232,121,249,0.85)]'
-                    : 'bg-[#C85A32]'
-                }`}
-              />
-              <div
-                className={`flex-1 ${
-                  isDark ? 'text-slate-200' : 'text-[#1C1917]'
-                }`}
-              >
-                {renderSegments(line.segments)}
-              </div>
+            <div key={idx} className="flex items-start gap-2.5">
+              <span className="mt-0.5 inline-flex min-w-[1.5rem] shrink-0 items-center justify-center rounded-md bg-orange-50 dark:bg-fuchsia-500/15 px-1.5 py-0.5 font-mono text-xs font-semibold text-[#c2410c] dark:text-fuchsia-300 border border-orange-200 dark:border-fuchsia-500/25">
+                {line.numberLabel}
+              </span>
+              <p className="flex-1 text-stone-800 dark:text-purple-50/90">
+                {renderTypedText(line.text, idx)}
+              </p>
             </div>
           );
         }
 
-        if (line.kind === 'numbered') {
+        if (line.type === 'bullet') {
           return (
-            <div key={idx} className="flex items-start gap-2.5 text-sm">
-              <span
-                className={`mt-0.5 inline-flex shrink-0 items-center justify-center rounded px-1.5 py-0.5 font-mono text-[11px] font-bold ${
-                  isDark
-                    ? 'border border-purple-500/40 bg-purple-900/50 text-purple-200'
-                    : 'border border-[#E7E0D6] bg-[#EAF2EC] text-[#2D6A4F]'
-                }`}
-              >
-                {line.numberLabel}
-              </span>
-              <div
-                className={`flex-1 ${
-                  isDark ? 'text-slate-200' : 'text-[#1C1917]'
-                }`}
-              >
-                {renderSegments(line.segments)}
-              </div>
+            <div key={idx} className="flex items-start gap-2.5 pl-1">
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#ea580c] dark:bg-fuchsia-400" />
+              <p className="flex-1 text-stone-800 dark:text-purple-50/90">
+                {renderTypedText(line.text, idx)}
+              </p>
             </div>
           );
         }
 
         return (
-          <p
-            key={idx}
-            className={`text-sm ${
-              isDark ? 'text-slate-200' : 'text-[#1C1917]'
-            }`}
-          >
-            {renderSegments(line.segments)}
+          <p key={idx} className="text-stone-800 dark:text-purple-50/90">
+            {renderTypedText(line.text, idx)}
           </p>
         );
       })}
     </div>
   );
-}
+});
+
+export default FormattedContent;

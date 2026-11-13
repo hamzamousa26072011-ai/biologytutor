@@ -1,59 +1,69 @@
-import { GoogleGenAI, GenerateContentParameters, GenerateContentResponse } from '@google/genai';
+import { GoogleGenAI, Part } from '@google/genai';
 
-const ACTIVE_MODELS = [
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-3.8-flash',
-  'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite',
-] as const;
+export const GEMINI_MODEL = 'gemini-4-hydrogen';
+export const TUTOR_FAST_MODEL = 'gemini-3.1-flash-lite';
 
-export function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    return null;
-  }
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
+let cachedClient: GoogleGenAI | null = null;
+let cachedFastClient: GoogleGenAI | null = null;
+
+export function getGeminiServerClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) return null;
+
+  if (!cachedClient) {
+    cachedClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
       },
-    },
-  });
+    });
+  }
+  return cachedClient;
 }
 
-/**
- * Calls Gemini generateContent with automatic failover and retry across active models
- * so multi-page OCR and grading never fail due to temporary demand spikes.
- */
-export async function generateContentWithFallback(
-  params: Omit<GenerateContentParameters, 'model'>
-): Promise<GenerateContentResponse | null> {
-  const ai = getGeminiClient();
-  if (!ai) return null;
+export function getTutorFastClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) return null;
 
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    for (const modelName of ACTIVE_MODELS) {
-      try {
-        const response = await ai.models.generateContent({
-          ...params,
-          model: modelName,
-        });
-        if (response && response.text) {
-          return response;
-        }
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    await new Promise((r) => setTimeout(r, 500));
+  if (!cachedFastClient) {
+    cachedFastClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+        retryOptions: {
+          attempts: 1,
+        },
+      },
+    });
   }
+  return cachedFastClient;
+}
 
-  if (lastError) {
-    console.error('All Gemini models failed after retries:', lastError);
+export interface UploadedPageInput {
+  mimeType: string;
+  base64Data: string;
+  label?: string;
+}
+
+export function buildMediaParts(pages?: UploadedPageInput[]): Part[] {
+  if (!Array.isArray(pages) || pages.length === 0) return [];
+  const parts: Part[] = [];
+  for (const page of pages) {
+    if (!page?.base64Data || !page?.mimeType) continue;
+    const cleanBase64 = page.base64Data.includes(',')
+      ? page.base64Data.split(',')[1]
+      : page.base64Data;
+    if (!cleanBase64) continue;
+    parts.push({
+      inlineData: {
+        mimeType: page.mimeType,
+        data: cleanBase64,
+      },
+    });
   }
-  return null;
+  return parts;
 }

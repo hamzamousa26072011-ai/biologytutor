@@ -1,0 +1,162 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 4.1: Global Safety Net (Default-Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        ('email' in request.auth.token &&
+          request.auth.token.email is string &&
+          request.auth.token.email.lower() == 'hamzamousa26072011@gmail.com') ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    // Pillar 2: Validation Blueprint for UserProfile
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+          'uid',
+          'email',
+          'name',
+          'provider',
+          'dailyDateKey',
+          'dailyUsedCount',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'email',
+          'name',
+          'provider',
+          'dailyDateKey',
+          'dailyUsedCount',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.uid == request.auth.uid &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.provider is string && data.provider.size() >= 1 && data.provider.size() <= 20 && (data.provider == 'google' || data.provider == 'email') &&
+        data.dailyDateKey is string && data.dailyDateKey.size() == 10 && data.dailyDateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+        data.dailyUsedCount is int && data.dailyUsedCount >= 0 && (isAdmin() ? data.dailyUsedCount <= 1000000 : data.dailyUsedCount <= 10) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Pillar 2: Validation Blueprint for SavedPaperRecord
+    function isValidSavedPaperRecord(data) {
+      return data.keys().hasAll([
+          'uid',
+          'title',
+          'awardedMarks',
+          'totalMarks',
+          'percentage',
+          'examinerSummary',
+          'correctedVersion',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'title',
+          'awardedMarks',
+          'totalMarks',
+          'percentage',
+          'examinerSummary',
+          'correctedVersion',
+          'createdAt'
+        ]) &&
+        data.uid == request.auth.uid &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        data.awardedMarks is int && data.awardedMarks >= 0 && data.awardedMarks <= 100 &&
+        data.totalMarks is int && data.totalMarks >= 1 && data.totalMarks <= 100 &&
+        data.percentage is int && data.percentage >= 0 && data.percentage <= 100 &&
+        data.examinerSummary is string && data.examinerSummary.size() >= 1 && data.examinerSummary.size() <= 4000 &&
+        data.correctedVersion is string && data.correctedVersion.size() >= 1 && data.correctedVersion.size() <= 4000 &&
+        data.createdAt is timestamp;
+    }
+
+    // Collection: /admins/{adminId}
+    match /admins/{adminId} {
+      allow get: if isVerifiedUser() && request.auth.uid == adminId && isValidId(adminId);
+    }
+
+    // Collection: /users/{userId}
+    match /users/{userId} {
+      allow get: if (isOwner(userId) || isAdmin()) && isValidId(userId);
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if (isOwner(userId) || isAdmin()) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'provider', 'dailyDateKey', 'dailyUsedCount', 'updatedAt'])
+        );
+
+      // Subcollection: /users/{userId}/papers/{paperId}
+      match /papers/{paperId} {
+        allow get: if (isOwner(userId) || isAdmin()) &&
+          isValidId(userId) &&
+          isValidId(paperId) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.uid == userId;
+
+        allow list: if isOwner(userId) &&
+          resource.data.uid == request.auth.uid;
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(paperId) &&
+          isValidSavedPaperRecord(incoming()) &&
+          incoming().createdAt == request.time &&
+          get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+
+        allow delete: if (isOwner(userId) || isAdmin()) &&
+          isValidId(userId) &&
+          isValidId(paperId) &&
+          (isAdmin() || existing().uid == request.auth.uid) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.uid == userId;
+      }
+    }
+  }
+}

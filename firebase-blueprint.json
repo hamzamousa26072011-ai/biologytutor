@@ -1,0 +1,142 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Saved student profile and daily question usage for da7ee7-biology.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the student.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Student email address.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "name": {
+          "type": "string",
+          "description": "Student display name.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "provider": {
+          "type": "string",
+          "description": "Sign-in provider used by the student.",
+          "enum": ["google", "email"],
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "dailyDateKey": {
+          "type": "string",
+          "description": "Current YYYY-MM-DD date key for tracking daily question usage.",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "dailyUsedCount": {
+          "type": "integer",
+          "description": "Number of questions marked on dailyDateKey (0 to 10 for standard users, unlimited for verified admin)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user profile was first saved."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user profile was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "name",
+        "provider",
+        "dailyDateKey",
+        "dailyUsedCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SavedPaperRecord": {
+      "title": "SavedPaperRecord",
+      "description": "A graded Cambridge IGCSE Biology (0610) paper submission belonging to a user.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Question title.",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "awardedMarks": {
+          "type": "integer",
+          "description": "Whole marks awarded."
+        },
+        "totalMarks": {
+          "type": "integer",
+          "description": "Total available marks."
+        },
+        "percentage": {
+          "type": "integer",
+          "description": "Score percentage (0 to 100)."
+        },
+        "examinerSummary": {
+          "type": "string",
+          "description": "Examiner comparison summary.",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "correctedVersion": {
+          "type": "string",
+          "description": "Full-mark model answer.",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when submission was saved."
+        }
+      },
+      "required": [
+        "uid",
+        "title",
+        "awardedMarks",
+        "totalMarks",
+        "percentage",
+        "examinerSummary",
+        "correctedVersion",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private student user profile and daily question usage record."
+    },
+    "/users/{userId}/papers/{paperId}": {
+      "schema": {
+        "$ref": "#/entities/SavedPaperRecord"
+      },
+      "description": "Graded biology paper submissions owned by the student."
+    }
+  }
+}

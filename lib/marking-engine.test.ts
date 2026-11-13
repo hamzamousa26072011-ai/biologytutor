@@ -1,124 +1,230 @@
-import { describe, it } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  calculateCambridgeGrade,
-  detectTotalMarksFromScheme,
-  hasUnitInPromptOrAnswerLine,
-  gradeSubmissionDeterministic,
-  parseFormattedLines,
-  answerBiologyTutorDeterministic,
+  ADMIN_EMAIL,
   MAX_DAILY_QUESTIONS,
   canUserGradeQuestion,
-  incrementDailyQuestionUsage,
+  computeTypewriterAdvance,
+  detectTotalMarksFromMarkScheme,
+  getCompactTutorSystemPrompt,
   getRemainingDailyQuestions,
-} from './marking-engine.ts';
+  gradeSubmissionDeterministic,
+  isAdminEmail,
+  parseFormattedLines,
+} from './marking-engine';
+import { searchBiologyNotes } from './biology-notes-kb';
+import { executeHedgedStream } from './tutor-hedge';
 
-describe('Cambridge IGCSE 0610 Marking Engine & Pure Logic', () => {
-  it('calculates whole-number percentages and Cambridge grades accurately', () => {
-    assert.deepEqual(calculateCambridgeGrade(4, 4), { grade: 'A*', percentage: 100 });
-    assert.deepEqual(calculateCambridgeGrade(3, 4), { grade: 'B', percentage: 75 });
-    assert.deepEqual(calculateCambridgeGrade(2, 4), { grade: 'D', percentage: 50 });
-    assert.deepEqual(calculateCambridgeGrade(0, 4), { grade: 'U', percentage: 0 });
-  });
+test('gradeSubmissionDeterministic returns whole marks without letter grade labels', () => {
+  const markScheme = `
+    1. Osmosis is the net movement of water molecules [1]
+    2. from a region of higher water potential to lower water potential [1]
+    3. across a partially permeable membrane [1]
+    [Total: 3]
+  `;
+  const studentAnswer =
+    'Osmosis is the net movement of water molecules from a region of higher water potential to lower water potential through a partially permeable membrane.';
 
-  it('auto-detects total available marks from mark scheme rubric codes', () => {
-    const scheme = `[B1] net movement of water molecules;\n[B1] from higher water potential to lower water potential;\n[B1] through a partially permeable membrane;`;
-    assert.equal(detectTotalMarksFromScheme(scheme), 3);
+  const result = gradeSubmissionDeterministic(studentAnswer, markScheme);
+  assert.equal(result.totalMarks, 3);
+  assert.equal(result.awardedMarks, 3);
+  assert.equal(Number.isInteger(result.awardedMarks), true);
+  assert.equal(result.percentage, 100);
+  assert.equal(/\bGrade\s+[A-G*U]\b/i.test(result.examinerSummary), false);
+});
 
-    const schemeWithTotal = `[M1] (114 - 30) / 30;\n[A1] 280;\nTotal: [2 marks]`;
-    assert.equal(detectTotalMarksFromScheme(schemeWithTotal), 2);
-  });
+test('detectTotalMarksFromMarkScheme respects max marks', () => {
+  const ms = `
+    - Thick muscular wall in left ventricle;
+    - Pumps blood at higher pressure;
+    - All around the body / systemic circulation;
+    - Right ventricle only pumps to nearby lungs;
+    [max 3]
+  `;
+  assert.equal(detectTotalMarksFromMarkScheme(ms), 3);
+});
 
-  it('enforces the Critical Unit Rule when unit is printed on the answer line or prompt', () => {
-    const prompt = 'Calculate the percentage increase in lactic acid. Answer line: ........... %';
-    const scheme = `[M1] (9.5 - 1.9) / 1.9 * 100;\n[A1] 400 (%);`;
+test('Critical Unit Rule withholds mark when numeric answer lacks biological unit', () => {
+  const ms = `
+    1. Magnification = 50 / 0.02 [1]
+    2. Actual length = 250 µm [1]
+  `;
+  const student = 'Magnification is 50 / 0.02 and actual length = 250';
+  const result = gradeSubmissionDeterministic(student, ms);
+  assert.equal(result.criticalUnitDeducted, true);
+  assert.ok(result.awardedMarks < result.totalMarks);
+});
 
-    assert.equal(hasUnitInPromptOrAnswerLine(prompt, scheme), true);
+test('Contradiction Rule (CON) rejects enzyme killed wording', () => {
+  const ms = 'Above optimum temperature the enzyme is denatured and active site changes shape [1]';
+  const student = 'Above optimum temperature the enzyme is killed so it cannot work.';
+  const result = gradeSubmissionDeterministic(student, ms);
+  assert.equal(result.contradictionTriggered, true);
+  assert.equal(result.awardedMarks, 0);
+});
 
-    // Student writes only the numerical value "400" without "%" while showing working
-    const result = gradeSubmissionDeterministic({
-      questionPrompt: prompt,
-      markScheme: scheme,
-      studentAnswer: '(9.5 - 1.9) / 1.9 * 100 = 400',
-    });
+test('parseFormattedLines extracts headings, numbered items, and bullets cleanly', () => {
+  const lines = parseFormattedLines('**Summary**\n1. First point\n- Second bullet');
+  assert.equal(lines[0].type, 'heading');
+  assert.equal(lines[1].type, 'numbered');
+  assert.equal(lines[2].type, 'bullet');
+});
 
-    assert.equal(result.totalMarks, 2);
-    assert.equal(result.awardedMarks, 2);
-    assert.equal(result.marksLost, 0);
-    assert.equal(result.unitRuleApplied, true);
-  });
+test('searchBiologyNotes stays strictly scoped to Cambridge 0610 Biology', () => {
+  const bio = searchBiologyNotes('Explain osmosis and water potential in plant cells');
+  assert.equal(bio.isOutOfScope, false);
+  assert.ok(bio.matches.length >= 1);
 
-  it('enforces whole marks only, identifies lost marks, and omits letter grade from examinerSummary', () => {
-    const scheme = `[B1] net movement of water molecules;\n[B1] from higher water potential to lower water potential;\n[B1] across a partially permeable membrane;`;
-    const studentAnswer = 'Water moves from higher water potential to lower water potential.';
+  const nonBio = searchBiologyNotes('Solve quadratic equations in algebra');
+  assert.equal(nonBio.isOutOfScope, true);
+  assert.equal(nonBio.matches.length, 0);
+});
 
-    const result = gradeSubmissionDeterministic({
-      markScheme: scheme,
-      studentAnswer,
-    });
+test('Standard user daily quota enforces 10 questions/day and requires sign-in', () => {
+  const dateKey = '2026-11-12';
+  const signedOut = canUserGradeQuestion({}, null, dateKey);
+  assert.equal(signedOut.allowed, false);
+  assert.equal(signedOut.isAdmin, false);
 
-    assert.equal(Number.isInteger(result.awardedMarks), true);
-    assert.equal(result.totalMarks, 3);
-    assert.equal(result.awardedMarks >= 1 && result.awardedMarks < 3, true);
-    assert.equal(result.lostMarksBreakdown.length, result.marksLost);
-    assert.equal(result.examinerSummary.includes('Grade '), false);
-  });
+  const studentEmail = 'student@cambridge-igcse.edu';
+  const usageMap = { [`${studentEmail}::${dateKey}`]: 7 };
+  assert.equal(getRemainingDailyQuestions(usageMap, studentEmail, dateKey), 3);
+  const underLimit = canUserGradeQuestion(usageMap, studentEmail, dateKey);
+  assert.equal(underLimit.allowed, true);
+  assert.equal(underLimit.remaining, 3);
+  assert.equal(underLimit.max, MAX_DAILY_QUESTIONS);
 
-  it('strips raw markdown asterisks in FormattedContent parser while preserving bold and code segments', () => {
-    const raw = `### **Osmosis Definition**\n- Net movement of **water molecules** across \`partially permeable membrane\`.\n1. High **water potential** to low.`;
-    const parsed = parseFormattedLines(raw);
+  const atLimitMap = { [`${studentEmail}::${dateKey}`]: 10 };
+  const blocked = canUserGradeQuestion(atLimitMap, studentEmail, dateKey);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.remaining, 0);
+});
 
-    assert.equal(parsed.length, 3);
-    assert.equal(parsed[0].kind, 'heading');
-    assert.equal(parsed[1].kind, 'bullet');
-    assert.equal(parsed[2].kind, 'numbered');
-    assert.equal(parsed[2].numberLabel, '01');
+test('Admin account hamzamousa26072011@gmail.com has unlimited access only when signed in', () => {
+  const dateKey = '2026-11-12';
+  assert.equal(isAdminEmail(ADMIN_EMAIL), true);
+  assert.equal(isAdminEmail('  HAMZAMOUSA26072011@GMAIL.COM '), true);
+  assert.equal(isAdminEmail('other@gmail.com'), false);
 
-    // Verify no segment contains raw '**'
-    for (const line of parsed) {
-      for (const seg of line.segments) {
-        assert.equal(seg.value.includes('**'), false);
-      }
+  const usageMap = { [`${ADMIN_EMAIL}::${dateKey}`]: 250 };
+  const adminStatus = canUserGradeQuestion(usageMap, 'HamzaMousa26072011@gmail.com', dateKey);
+  assert.equal(adminStatus.allowed, true);
+  assert.equal(adminStatus.isAdmin, true);
+  assert.equal(adminStatus.remaining, Infinity);
+  assert.equal(getRemainingDailyQuestions(usageMap, ADMIN_EMAIL, dateKey), Infinity);
+
+  const signedOutStatus = canUserGradeQuestion(usageMap, null, dateKey);
+  assert.equal(signedOutStatus.allowed, false);
+  assert.equal(signedOutStatus.isAdmin, false);
+});
+
+test('Compact tutor system prompt stays concise and Cambridge 0610 grounded', () => {
+  const prompt = getCompactTutorSystemPrompt();
+  assert.ok(prompt.includes('0610'));
+  assert.ok(prompt.length < 600);
+});
+
+test('computeTypewriterAdvance paces smooth fast character steps and completes cleanly', () => {
+  const step1 = computeTypewriterAdvance(0, 100, false);
+  assert.ok(step1 >= 5 && step1 < 100);
+
+  const tail = computeTypewriterAdvance(97, 100, true);
+  assert.equal(tail, 100);
+
+  assert.equal(computeTypewriterAdvance(100, 100, true), 100);
+});
+
+test('executeHedgedStream uses fast primary without launching hedge', async () => {
+  let hedgeLaunched = false;
+  async function* makeStream(items: string[]) {
+    for (const text of items) {
+      yield { text };
     }
-  });
+  }
 
-  it('grounds tutor answers strictly in the Biology 0610 computerized notes without mentioning filenames or authors', () => {
-    const answer = answerBiologyTutorDeterministic('Explain osmosis and water potential in plant cells');
-    assert.equal(answer.includes('water potential'), true);
-    assert.equal(answer.toLowerCase().includes('nihal'), false);
-    assert.equal(answer.toLowerCase().includes('.pdf'), false);
-  });
-
-  it('requires sign-in and enforces a strict 10 questions per day limit per user', () => {
-    const dateKey = '2026-11-12';
-    let usageMap: Record<string, number> = {};
-
-    // Unauthenticated users cannot grade
-    const guestCheck = canUserGradeQuestion(usageMap, null, dateKey);
-    assert.equal(guestCheck.allowed, false);
-
-    // Authenticated user gets 10 questions per day
-    const email = 'hamzamousa26072011@gmail.com';
-    assert.equal(MAX_DAILY_QUESTIONS, 10);
-    assert.equal(getRemainingDailyQuestions(usageMap, email, dateKey), 10);
-
-    for (let i = 0; i < 10; i++) {
-      const check = canUserGradeQuestion(usageMap, email, dateKey);
-      assert.equal(check.allowed, true);
-      assert.equal(check.used, i);
-      assert.equal(check.remaining, 10 - i);
-      usageMap = incrementDailyQuestionUsage(usageMap, email, dateKey);
+  const chunks: string[] = [];
+  const stream = executeHedgedStream(
+    async () => makeStream(['Osmosis ', 'is net movement']),
+    async () => {
+      hedgeLaunched = true;
+      return makeStream(['Backup']);
+    },
+    {
+      hedgeDelayMs: 60,
+      extractText: (c) => c.text,
     }
+  );
 
-    // 11th question on the same day is blocked
-    const eleventhCheck = canUserGradeQuestion(usageMap, email, dateKey);
-    assert.equal(eleventhCheck.allowed, false);
-    assert.equal(eleventhCheck.used, 10);
-    assert.equal(eleventhCheck.remaining, 0);
+  for await (const c of stream) {
+    chunks.push(c.text);
+  }
 
-    // Next day resets back to 10 available questions
-    const nextDayCheck = canUserGradeQuestion(usageMap, email, '2026-11-13');
-    assert.equal(nextDayCheck.allowed, true);
-    assert.equal(nextDayCheck.remaining, 10);
-  });
+  assert.equal(hedgeLaunched, false);
+  assert.deepEqual(chunks, ['Osmosis ', 'is net movement']);
+});
+
+test('executeHedgedStream launches hedge on slow primary, returns faster hedge, and aborts primary', async () => {
+  let primaryAborted = false;
+  let hedgeAborted = false;
+
+  const stream = executeHedgedStream(
+    async (signal) => ({
+      async *[Symbol.asyncIterator]() {
+        signal.addEventListener('abort', () => {
+          primaryAborted = true;
+        });
+        await new Promise((r) => setTimeout(r, 250));
+        if (!signal.aborted) yield { text: 'Slow primary' };
+      },
+    }),
+    async (signal) => ({
+      async *[Symbol.asyncIterator]() {
+        signal.addEventListener('abort', () => {
+          hedgeAborted = true;
+        });
+        await new Promise((r) => setTimeout(r, 15));
+        yield { text: 'Fast hedge 1' };
+        yield { text: 'Fast hedge 2' };
+      },
+    }),
+    {
+      hedgeDelayMs: 30,
+      extractText: (c) => c.text,
+    }
+  );
+
+  const out: string[] = [];
+  for await (const c of stream) {
+    out.push(c.text);
+  }
+
+  assert.deepEqual(out, ['Fast hedge 1', 'Fast hedge 2']);
+  assert.equal(primaryAborted, true);
+  assert.equal(hedgeAborted, false);
+});
+
+test('executeHedgedStream falls back immediately when primary fails early', async () => {
+  const t0 = Date.now();
+  const stream = executeHedgedStream(
+    async () => {
+      throw new Error('Upstream 503');
+    },
+    async () => ({
+      async *[Symbol.asyncIterator]() {
+        yield { text: 'Immediate hedge recovery' };
+      },
+    }),
+    {
+      hedgeDelayMs: 500,
+      extractText: (c) => c.text,
+    }
+  );
+
+  const out: string[] = [];
+  for await (const c of stream) {
+    out.push(c.text);
+  }
+
+  assert.deepEqual(out, ['Immediate hedge recovery']);
+  assert.ok(Date.now() - t0 < 250);
 });

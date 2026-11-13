@@ -4,33 +4,25 @@ import './globals.css';
 
 const plusJakarta = Plus_Jakarta_Sans({
   subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
   variable: '--font-sans',
   display: 'swap',
 });
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ['latin'],
-  weight: ['400', '500', '600'],
   variable: '--font-mono',
   display: 'swap',
 });
 
 export const metadata: Metadata = {
-  title: 'Biology Tutor — Cambridge IGCSE 0610',
+  title: 'da7ee7-biology | Cambridge IGCSE Biology (0610) Grader & Tutor',
   description:
     'Automatic Cambridge IGCSE Biology (0610) Exam Question Checker, Multi-Page Mark Scheme Grader, and AI Biology Subject Tutor.',
   openGraph: {
-    title: 'Biology Tutor — Cambridge IGCSE 0610',
+    title: 'da7ee7-biology | Cambridge IGCSE Biology (0610) Grader & Tutor',
     description:
       'Automatic Cambridge IGCSE Biology (0610) Exam Question Checker, Multi-Page Mark Scheme Grader, and AI Biology Subject Tutor.',
     type: 'website',
-  },
-  twitter: {
-    card: 'summary_large_image',
-    title: 'Biology Tutor — Cambridge IGCSE 0610',
-    description:
-      'Automatic Cambridge IGCSE Biology (0610) Exam Question Checker, Multi-Page Mark Scheme Grader, and AI Biology Subject Tutor.',
   },
 };
 
@@ -38,23 +30,21 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   maximumScale: 5,
+  themeColor: '#080312',
 };
 
 export default function RootLayout({
   children,
-}: {
+}: Readonly<{
   children: React.ReactNode;
-}) {
+}>) {
   return (
     <html
       lang="en"
-      className={`dark ${plusJakarta.variable} ${jetbrainsMono.variable}`}
       suppressHydrationWarning
+      className={`dark ${plusJakarta.variable} ${jetbrainsMono.variable}`}
     >
-      <body
-        className="font-sans antialiased selection:bg-purple-500/30 dark:bg-[#06050b] dark:text-slate-100 bg-[#F8F6F1] text-[#1C1917] min-h-dvh transition-colors duration-200"
-        suppressHydrationWarning
-      >
+      <body className="min-h-screen bio-grid-bg font-sans text-slate-900 dark:text-slate-100 selection:bg-fuchsia-500/30 selection:text-fuchsia-950 dark:selection:text-fuchsia-100">
         {children}
       </body>
     </html>

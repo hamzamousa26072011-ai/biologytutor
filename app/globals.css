@@ -4,25 +4,74 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
-  * {
-    box-sizing: border-box;
-  }
-
   html,
   body {
-    margin: 0;
-    padding: 0;
-    min-height: 100dvh;
+    overflow-x: clip;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    scroll-behavior: smooth;
+    transition: background-color 0.22s ease, color 0.22s ease;
+  }
+
+  html.dark,
+  html.dark body {
+    background-color: #080312;
+    color: #f4eefc;
+  }
+
+  html.light,
+  html.light body {
+    background-color: #f9f7f4;
+    color: #1c1917;
   }
 }
 
-/* Custom subtle scrollbars for carousels and chat */
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
+html.dark .bio-grid-bg {
+  background-color: #080312;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(168, 85, 247, 0.18), transparent 70%),
+    linear-gradient(to right, rgba(139, 92, 246, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(139, 92, 246, 0.06) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
 }
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+
+html.light .bio-grid-bg {
+  background-color: #f9f7f4;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(234, 88, 12, 0.05), transparent 70%),
+    linear-gradient(to right, rgba(28, 25, 23, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(28, 25, 23, 0.04) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
+}
+
+/* Custom sleek scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+html.dark ::-webkit-scrollbar-track {
+  background: rgba(15, 7, 30, 0.6);
+}
+
+html.light ::-webkit-scrollbar-track {
+  background: rgba(245, 242, 238, 0.9);
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: rgba(168, 85, 247, 0.35);
+  border-radius: 9999px;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  background: rgba(234, 88, 12, 0.3);
+  border-radius: 9999px;
+}
+
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(217, 70, 239, 0.6);
+}
+
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(234, 88, 12, 0.55);
 }

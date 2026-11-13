@@ -1,9 +1,7 @@
 {
-  "name": "Biology Tutor — Cambridge IGCSE 0610",
+  "name": "da7ee7-biology",
   "description": "Automatic Cambridge IGCSE Biology (0610) Exam Question Checker, Multi-Page Mark Scheme Grader, and AI Biology Subject Tutor.",
-  "requestFramePermissions": [
-    "camera"
-  ],
+  "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

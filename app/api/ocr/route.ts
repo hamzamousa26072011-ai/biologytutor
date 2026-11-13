@@ -1,64 +1,63 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateContentWithFallback } from '@/lib/gemini-server';
-
-export const dynamic = 'force-dynamic';
+import { Part } from '@google/genai';
+import {
+  GEMINI_MODEL,
+  UploadedPageInput,
+  buildMediaParts,
+  getGeminiServerClient,
+} from '@/lib/gemini-server';
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { dataUrl, mimeType, targetType } = body as {
-      dataUrl: string;
-      mimeType: string;
-      targetType: 'student' | 'markscheme';
-      fileName?: string;
+    const body = (await req.json()) as {
+      pages?: UploadedPageInput[];
+      role?: 'student' | 'mark_scheme';
     };
+    const pages = Array.isArray(body.pages) ? body.pages : [];
+    const role = body.role === 'mark_scheme' ? 'mark_scheme' : 'student';
 
-    if (!dataUrl) {
-      return NextResponse.json({ error: 'Missing image/file data' }, { status: 400 });
+    if (pages.length === 0) {
+      return NextResponse.json({ error: 'No pages provided for OCR.' }, { status: 400 });
     }
 
-    const base64Data = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-    const resolvedMime = mimeType || 'image/jpeg';
+    const ai = getGeminiServerClient();
+    if (!ai) {
+      return NextResponse.json({
+        transcribedText:
+          role === 'mark_scheme'
+            ? '[Official Mark Scheme pages ready for marking]'
+            : '[Student answer pages ready for marking]',
+        engine: 'offline',
+      });
+    }
 
-    const prompt =
-      targetType === 'markscheme'
-        ? `You are a Senior Cambridge IGCSE Biology (0610) Official Mark Scheme OCR Engine.
-Examine this Official Mark Scheme image/document line-by-line and column-by-column, and transcribe ALL text verbatim with 100% precision:
-1. Extract every row of the 4-column Cambridge Mark Scheme table:
-   - Column 1 (Question): Exact question and sub-question numbers (e.g. 1(a)(i), 1(a)(ii), 1(b)).
-   - Column 2 (Answer): Every marking point separated by semicolons (;), preserving all underlined or bolded keywords (write underlined keywords in **bold**), chemical equations, numerical values, and alternative wording separated by "/" or "OR".
-   - Column 3 (Marks): Exact integer mark allocation for each part and sub-part (e.g. [1], [2], [3], Total: [X]).
-   - Column 4 (Guidance): Every examiner instruction including Accept (A), Allow, Ignore (I), Reject (R), ORA (or reverse argument), ECF (error carried forward), AVP (any valid point), and "max [X]".
-2. Explicitly note if any unit is already printed on the answer line.
-Return ONLY the complete, structured verbatim transcription without commentary.`
-        : `You are a Senior Cambridge IGCSE Biology (0610) Handwriting & Exam Script OCR Engine.
-Examine this Student's Answer exam page image/document line-by-line and transcribe ALL visible printed and handwritten text with 100% precision:
-1. Printed Question Context: Transcribe every visible question number, sub-question label (e.g. 1(a)(i), (b)), printed question stem, diagram/graph axes and labels, table headers, and the exact printed answer line including any pre-printed unit (such as "........... %", "........... beats / min", "........... dm³", "........... arbitrary units") under "Question Prompt / Answer Line:".
-2. Student's Handwritten / Typed Response: Carefully decipher cursive, slanted, faint pencil, or dark pen handwriting line-by-line. Transcribe every word, biological term, symbol, arrow, table entry, and mathematical working/calculation under "Student's Answer:".
-3. Crossed-Out Text Rule: Ignore words or lines that the student has clearly struck through or crossed out, and transcribe only their intended final words verbatim (do NOT auto-correct their biological misconceptions so the examiner can grade their exact wording).
-Return ONLY the complete verbatim transcription without commentary.`;
+    const parts: Part[] = [
+      ...buildMediaParts(pages),
+      {
+        text:
+          role === 'mark_scheme'
+            ? 'Transcribe this Cambridge IGCSE Biology (0610) Official Mark Scheme verbatim. Preserve all bullet points, semicolons, slash alternatives, bracketed mark totals like [1] or [Total: 4], "max", "accept", "ignore", and "reject" instructions, and biological units accurately. Output clean plain text.'
+            : 'Transcribe this student Biology exam answer accurately across all pages in order. Preserve handwriting faithfully including numbers, decimals, biological equations, subscripts/superscripts, labels, and units (e.g. µm, mm, cm³, %, °C). Fix only obvious character-level OCR noise without adding extra biological knowledge that the student did not write. Output clean plain text.',
+      },
+    ];
 
-    const response = await generateContentWithFallback({
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              inlineData: {
-                mimeType: resolvedMime,
-                data: base64Data,
-              },
-            },
-            { text: prompt },
-          ],
-        },
-      ],
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: { parts },
+      config: {
+        temperature: 0.1,
+      },
     });
 
-    const extractedText = response?.text?.trim() || '';
-    return NextResponse.json({ text: extractedText });
+    return NextResponse.json({
+      transcribedText: (response.text || '').trim(),
+      engine: 'gemini',
+    });
   } catch (error) {
-    console.error('OCR route error:', error);
-    return NextResponse.json({ text: '' });
+    console.warn('OCR route fallback:', error);
+    return NextResponse.json(
+      { error: 'Unable to transcribe image right now.' },
+      { status: 500 }
+    );
   }
 }

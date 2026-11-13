@@ -1,331 +1,394 @@
 import { BIOLOGY_SYLLABUS_NOTES, searchBiologyNotes } from './biology-notes-kb';
 
-export type CambridgeGrade = 'A*' | 'A' | 'B' | 'C' | 'D' | 'E' | 'U';
+export const ADMIN_EMAIL = 'hamzamousa26072011@gmail.com';
+export const MAX_DAILY_QUESTIONS = 10;
 
-export interface PageItem {
-  id: string;
-  pageNumber: number;
-  fileName: string;
-  mimeType: string;
-  dataUrl: string;
-  ocrStatus: 'pending' | 'processing' | 'done' | 'error';
-  ocrText: string;
+export function isAdminEmail(email?: string | null): boolean {
+  if (!email || typeof email !== 'string') return false;
+  return email.trim().toLowerCase() === ADMIN_EMAIL;
 }
 
+export type MarkPointStatus = 'awarded' | 'missed' | 'contradicted';
+
 export interface RubricPointEvaluation {
-  code: string; // e.g. "[B1]", "[M1]", "[A1]", "[C1]"
-  description: string;
-  satisfied: boolean;
-  marksAwarded: number; // Whole marks only: 1 or 0 (or whole integer)
+  code: string;
+  criterion: string;
   maxMarks: number;
+  awardedMarks: number;
+  status: MarkPointStatus;
+  studentEvidence: string;
   examinerNote: string;
 }
 
-export interface LostMarkBreakdown {
-  rubricCode: string;
-  whatWasWrong: string;
-  whyMarkDeducted: string;
-  howToEarnFullMarks: string;
-}
-
 export interface GradingResult {
-  questionTitle: string;
-  grade: CambridgeGrade;
-  percentage: number;
   awardedMarks: number;
   totalMarks: number;
-  marksLost: number;
+  percentage: number;
+  criticalUnitDeducted: boolean;
+  contradictionTriggered: boolean;
+  extractedStudentAnswer?: string;
+  extractedMarkScheme?: string;
+  rubricBreakdown: RubricPointEvaluation[];
   examinerSummary: string;
-  unitRuleApplied: boolean;
-  transcribedStudentAnswer?: string;
-  transcribedMarkScheme?: string;
-  howToEarnFullMarksSummary?: string;
-  rubricPoints: RubricPointEvaluation[];
-  lostMarksBreakdown: LostMarkBreakdown[];
   correctedVersion: string;
+  missingKeywords: string[];
+  examinerTip: string;
 }
 
-export interface SavedPaper {
-  id: string;
-  title: string;
-  createdAt: string;
-  studentEmail: string;
-  studentAnswerText: string;
-  markSchemeText: string;
-  questionPrompt?: string;
-  result: GradingResult;
+export interface SubmissionMetadata {
+  studentFileCount?: number;
+  markSchemeFileCount?: number;
+  usedOcr?: boolean;
 }
 
-export interface StudentUser {
-  email: string;
-  name?: string;
-  provider?: 'email' | 'google';
+export interface FormattedLine {
+  type: 'heading' | 'bullet' | 'numbered' | 'paragraph' | 'divider';
+  text: string;
+  numberLabel?: string;
 }
 
-export const MAX_DAILY_QUESTIONS = 10;
+export interface UserDailyQuotaStatus {
+  allowed: boolean;
+  used: number;
+  remaining: number;
+  max: number;
+  isAdmin: boolean;
+  reason?: string;
+}
 
-/**
- * Returns a local YYYY-MM-DD date key for tracking daily per-user question limits.
- */
 export function getTodayDateKey(date: Date = new Date()): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 }
 
-export function getUserDailyUsageKey(
-  email: string,
-  dateKey: string = getTodayDateKey()
-): string {
-  return `${email.trim().toLowerCase()}__${dateKey}`;
-}
-
-export function getDailyQuestionsUsed(
-  usageMap: Record<string, number>,
-  email?: string | null,
-  dateKey: string = getTodayDateKey()
-): number {
-  if (!email || !email.trim()) return 0;
-  const key = getUserDailyUsageKey(email, dateKey);
-  const raw = usageMap[key] ?? 0;
-  return Math.max(0, Math.floor(raw));
-}
-
 export function getRemainingDailyQuestions(
-  usageMap: Record<string, number>,
-  email?: string | null,
+  usageByEmailDate: Record<string, number> | undefined | null,
+  userEmail?: string | null,
   dateKey: string = getTodayDateKey()
 ): number {
-  const used = getDailyQuestionsUsed(usageMap, email, dateKey);
+  if (!userEmail) return 0;
+  if (isAdminEmail(userEmail)) return Infinity;
+  const normalizedKey = `${userEmail.trim().toLowerCase()}::${dateKey}`;
+  const used = Math.max(0, Math.floor(usageByEmailDate?.[normalizedKey] ?? 0));
   return Math.max(0, MAX_DAILY_QUESTIONS - used);
 }
 
 export function canUserGradeQuestion(
-  usageMap: Record<string, number>,
-  email?: string | null,
+  usageByEmailDate: Record<string, number> | undefined | null,
+  userEmail?: string | null,
   dateKey: string = getTodayDateKey()
-): {
-  allowed: boolean;
-  used: number;
-  remaining: number;
-  reason?: string;
-} {
-  if (!email || !email.trim()) {
+): UserDailyQuotaStatus {
+  if (!userEmail || !userEmail.trim()) {
     return {
       allowed: false,
       used: 0,
       remaining: 0,
-      reason: 'Please sign in to use Paper Correction (10 questions per day).',
+      max: MAX_DAILY_QUESTIONS,
+      isAdmin: false,
+      reason: 'Sign in with Google or your email to access Paper Correction.',
     };
   }
-  const used = getDailyQuestionsUsed(usageMap, email, dateKey);
+
+  const normalizedKey = `${userEmail.trim().toLowerCase()}::${dateKey}`;
+  const used = Math.max(0, Math.floor(usageByEmailDate?.[normalizedKey] ?? 0));
+
+  if (isAdminEmail(userEmail)) {
+    return {
+      allowed: true,
+      used,
+      remaining: Infinity,
+      max: Infinity,
+      isAdmin: true,
+    };
+  }
+
   const remaining = Math.max(0, MAX_DAILY_QUESTIONS - used);
-  if (used >= MAX_DAILY_QUESTIONS) {
+  if (remaining <= 0) {
     return {
       allowed: false,
       used,
       remaining: 0,
-      reason: `You have reached your daily limit of ${MAX_DAILY_QUESTIONS} questions today. Your allowance resets tomorrow.`,
+      max: MAX_DAILY_QUESTIONS,
+      isAdmin: false,
+      reason: 'You have reached your daily limit of 10 questions for today. Come back tomorrow.',
     };
   }
+
   return {
     allowed: true,
     used,
     remaining,
+    max: MAX_DAILY_QUESTIONS,
+    isAdmin: false,
   };
 }
 
-export function incrementDailyQuestionUsage(
-  usageMap: Record<string, number>,
-  email: string,
-  dateKey: string = getTodayDateKey()
-): Record<string, number> {
-  if (!email || !email.trim()) return usageMap;
-  const key = getUserDailyUsageKey(email, dateKey);
-  const current = getDailyQuestionsUsed(usageMap, email, dateKey);
-  return {
-    ...usageMap,
-    [key]: current + 1,
-  };
+export function stripMarkdown(input: string): string {
+  if (!input) return '';
+  return input
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1')
+    .replace(/^#{1,6}\s*/gm, '')
+    .trim();
 }
 
-export interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  thought?: string;
-  imageUrl?: string;
-  timestamp: string;
+export function parseFormattedLines(rawText: string): FormattedLine[] {
+  if (!rawText || typeof rawText !== 'string') return [];
+
+  const cleaned = rawText.replace(/\r\n/g, '\n').trim();
+  if (!cleaned) return [];
+
+  const lines = cleaned.split('\n');
+  const result: FormattedLine[] = [];
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+
+    if (/^[-_*]{3,}$/.test(trimmed)) {
+      result.push({ type: 'divider', text: '' });
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^#{1,4}\s+(.+)$/);
+    if (headingMatch) {
+      result.push({ type: 'heading', text: stripMarkdown(headingMatch[1]) });
+      continue;
+    }
+
+    const boldTitleMatch = trimmed.match(/^\*\*([^*]{2,90})\*\*:?$/);
+    if (boldTitleMatch) {
+      result.push({ type: 'heading', text: boldTitleMatch[1].trim() });
+      continue;
+    }
+
+    const numberedMatch = trimmed.match(/^(\d+[.)])\s+(.+)$/);
+    if (numberedMatch) {
+      result.push({
+        type: 'numbered',
+        numberLabel: numberedMatch[1],
+        text: stripMarkdown(numberedMatch[2]),
+      });
+      continue;
+    }
+
+    const bulletMatch = trimmed.match(/^[-•*]\s+(.+)$/);
+    if (bulletMatch) {
+      result.push({
+        type: 'bullet',
+        text: stripMarkdown(bulletMatch[1]),
+      });
+      continue;
+    }
+
+    result.push({
+      type: 'paragraph',
+      text: stripMarkdown(trimmed),
+    });
+  }
+
+  return result;
 }
 
-export interface FormattedSegment {
-  type: 'text' | 'bold' | 'code';
-  value: string;
-}
+export function detectTotalMarksFromMarkScheme(markSchemeText: string): number {
+  if (!markSchemeText || !markSchemeText.trim()) return 0;
 
-export interface ParsedLine {
-  kind: 'heading' | 'bullet' | 'numbered' | 'paragraph' | 'spacer';
-  numberLabel?: string;
-  segments: FormattedSegment[];
-}
+  // Look for explicit "[Total: N]" or "[N marks]" or "(N marks)"
+  const bracketTotals = Array.from(
+    markSchemeText.matchAll(/(?:\[\s*(?:total\s*:?\s*)?(\d{1,2})\s*(?:marks?)?\s*\]|\(\s*(\d{1,2})\s*marks?\s*\))/gi)
+  ).map((m) => Number(m[1] || m[2]));
 
-/**
- * Calculates Cambridge IGCSE grade (A*, A, B, C, D, E, U) and whole-number percentage.
- * Enforces whole marks only.
- */
-export function calculateCambridgeGrade(
-  awardedMarks: number,
-  totalMarks: number
-): { grade: CambridgeGrade; percentage: number } {
-  const safeTotal = Math.max(1, Math.round(totalMarks));
-  const safeAwarded = Math.max(0, Math.min(safeTotal, Math.round(awardedMarks)));
-  const percentage = Math.round((safeAwarded / safeTotal) * 100);
-
-  let grade: CambridgeGrade = 'U';
-  if (percentage >= 90) grade = 'A*';
-  else if (percentage >= 80) grade = 'A';
-  else if (percentage >= 70) grade = 'B';
-  else if (percentage >= 60) grade = 'C';
-  else if (percentage >= 50) grade = 'D';
-  else if (percentage >= 40) grade = 'E';
-  else grade = 'U';
-
-  return { grade, percentage };
-}
-
-/**
- * Auto-detects total available marks from an official Cambridge mark scheme text.
- */
-export function detectTotalMarksFromScheme(markSchemeText: string): number {
-  if (!markSchemeText || !markSchemeText.trim()) return 1;
-
-  // 1. Check explicit "Total: [X]" or "Max [X]" or "[Total: X]"
-  const explicitTotalMatch = markSchemeText.match(
-    /(?:total|max(?:imum)?)\s*:?\s*\[?\s*(\d+)\s*(?:marks?|m)?\s*\]?/i
+  // Look for max markers like "max 4" or "[max 3]"
+  const maxMatches = Array.from(markSchemeText.matchAll(/\bmax(?:imum)?\s*[:=]?\s*(\d{1,2})\b/gi)).map((m) =>
+    Number(m[1])
   );
-  if (explicitTotalMatch) {
-    const parsed = parseInt(explicitTotalMatch[1], 10);
-    if (!isNaN(parsed) && parsed > 0 && parsed <= 40) {
-      return parsed;
+
+  // Count numbered or semicolon-separated marking points
+  const lines = markSchemeText
+    .split(/\r?\n|;/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 4 && !/^(total|max|accept|ignore|reject|allow|ora|avp)\b/i.test(l));
+
+  // If explicit bracketed [N] sum makes sense: e.g. "[3]" or "[Total: 6]"
+  if (bracketTotals.length === 1 && bracketTotals[0] >= 1 && bracketTotals[0] <= 25) {
+    if (maxMatches.length > 0 && maxMatches[0] > 0 && maxMatches[0] <= bracketTotals[0]) {
+      return maxMatches[0];
+    }
+    return bracketTotals[0];
+  }
+
+  if (maxMatches.length > 0 && maxMatches[0] >= 1 && maxMatches[0] <= 25) {
+    return maxMatches[0];
+  }
+
+  const standaloneOneMarkers = bracketTotals.filter((n) => n === 1).length;
+  if (standaloneOneMarkers >= 2) {
+    return standaloneOneMarkers;
+  }
+
+  const totalMarkerMatch = markSchemeText.match(/\btotal\s*[:=]\s*(\d{1,2})\b/i);
+  if (totalMarkerMatch) {
+    const val = Number(totalMarkerMatch[1]);
+    if (val >= 1 && val <= 30) return val;
+  }
+
+  if (lines.length >= 1) {
+    return Math.min(20, lines.length);
+  }
+
+  return 1;
+}
+
+interface ParsedRubricPoint {
+  code: string;
+  criterion: string;
+  keywords: string[];
+  requiredUnits: string[];
+  forbiddenContradictions: string[];
+  maxMarks: number;
+}
+
+function extractKeywordsFromCriterion(criterion: string): string[] {
+  const stopWords = new Set([
+    'that',
+    'this',
+    'with',
+    'from',
+    'into',
+    'onto',
+    'over',
+    'under',
+    'between',
+    'through',
+    'against',
+    'down',
+    'more',
+    'less',
+    'high',
+    'higher',
+    'low',
+    'lower',
+    'than',
+    'then',
+    'when',
+    'where',
+    'which',
+    'because',
+    'causes',
+    'allow',
+    'accept',
+    'ignore',
+    'reject',
+    'mark',
+    'marks',
+    'point',
+    'only',
+    'both',
+    'idea',
+    'reference',
+    'mention',
+    'statement',
+    'described',
+    'correct',
+  ]);
+
+  const words = criterion
+    .toLowerCase()
+    .replace(/[^a-z0-9\s%°/\-]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !stopWords.has(w));
+
+  return Array.from(new Set(words));
+}
+
+function detectUnitsInText(text: string): string[] {
+  const unitPatterns: Array<{ regex: RegExp; canonical: string }> = [
+    { regex: /\b\d+(?:\.\d+)?\s*(?:um|µm|micrometre|micrometres|micrometer|micrometers)\b/gi, canonical: 'µm' },
+    { regex: /\b\d+(?:\.\d+)?\s*(?:mm|millimetre|millimetres|millimeter|millimeters)\b/gi, canonical: 'mm' },
+    { regex: /\b\d+(?:\.\d+)?\s*(?:cm3|cm³|dm3|dm³|ml|litre|litres|l)\b/gi, canonical: 'volume' },
+    { regex: /\b\d+(?:\.\d+)?\s*(?:cm|centimetre|centimetres)\b/gi, canonical: 'cm' },
+    { regex: /\b\d+(?:\.\d+)?\s*(?:°c|deg\s*c|degrees?\s*celsius)\b/gi, canonical: '°C' },
+    { regex: /\b\d+(?:\.\d+)?\s*%/gi, canonical: '%' },
+    { regex: /\b\d+(?:\.\d+)?\s*(?:s|sec|seconds|min|minutes|h|hr|hours)\b/gi, canonical: 'time' },
+    { regex: /\b\d+(?:\.\d+)?\s*(?:g|kg|mg)\b/gi, canonical: 'mass' },
+    { regex: /\b(?:um|µm|mm|cm3|cm³|dm3|dm³|°c|%|kpa|mg\/dm3)\b/gi, canonical: 'unit' },
+  ];
+
+  const found: string[] = [];
+  for (const p of unitPatterns) {
+    if (p.regex.test(text)) {
+      found.push(p.canonical);
     }
   }
+  return Array.from(new Set(found));
+}
 
-  // 2. Count explicit rubric codes like [B1], [M1], [A1], [C1], [1], (1)
-  const codeMatches = [...markSchemeText.matchAll(/\[(?:[BMAC])?(\d+)\]/gi)];
-  if (codeMatches.length > 0) {
-    const sum = codeMatches.reduce((acc, m) => acc + parseInt(m[1], 10), 0);
-    if (sum > 0) return sum;
-  }
-
-  // 3. Otherwise count non-empty rubric lines (excluding pure notes / ignore / reject lines)
-  const lines = markSchemeText
-    .split(/\r?\n/)
+function buildRubricPoints(markSchemeText: string, totalMarks: number): ParsedRubricPoint[] {
+  const rawLines = markSchemeText
+    .split(/\r?\n|;/)
     .map((l) => l.trim())
     .filter(
       (l) =>
         l.length > 3 &&
-        !/^(?:note|ignore|reject|allow|avp|ora|ecf|max)\b/i.test(l)
+        !/^\[?\s*(?:total|max)\s*:?\s*\d+\s*(?:marks?)?\s*\]?$/i.test(l)
     );
 
-  return Math.max(1, Math.min(15, lines.length));
-}
+  const cleanedLines = rawLines.map((line) =>
+    line
+      .replace(/^M\d+\s*[:.)-]?\s*/i, '')
+      .replace(/^\d+[.)]\s*/, '')
+      .replace(/^\[\s*\d+\s*(?:marks?)?\s*\]\s*/i, '')
+      .replace(/\s*\[\s*\d+\s*(?:marks?)?\s*\]\s*$/i, '')
+      .replace(/\s*\(\s*\d+\s*marks?\s*\)\s*$/i, '')
+      .trim()
+  );
 
-/**
- * CRITICAL UNIT RULE detector:
- * Checks whether the question prompt or answer line already prints the unit
- * (e.g., "........... beats / min" or "Answer line: ....... %") or the mark scheme
- * states the unit is on the answer line.
- */
-export function hasUnitInPromptOrAnswerLine(
-  questionPrompt: string = '',
-  markScheme: string = ''
-): boolean {
-  const combined = `${questionPrompt}\n${markScheme}`;
-  // Look for patterns like "....... unit", "____ beats / min", "unit printed on answer line", "on answer line"
-  if (/(\.{3,}|_{3,})\s*[a-zA-Z%/°µ]+/i.test(combined)) {
-    return true;
-  }
-  if (/answer\s*line\s*[:=-]?\s*(\.{2,}|_{2,})?\s*[a-zA-Z%/°µ]+/i.test(combined)) {
-    return true;
-  }
-  if (/unit\s+(?:is\s+)?(?:already\s+)?(?:given|printed|included|on\s+the\s+answer\s+line)/i.test(combined)) {
-    return true;
-  }
-  return false;
-}
+  const slice = cleanedLines.slice(0, Math.max(1, totalMarks));
+  const points: ParsedRubricPoint[] = slice.map((criterion, idx) => {
+    const requiredUnits = detectUnitsInText(criterion);
+    const keywords = extractKeywordsFromCriterion(criterion);
+    const forbiddenContradictions: string[] = [];
 
-/**
- * Extracts structured rubric items from a raw mark scheme string.
- */
-export function parseMarkSchemePoints(
-  markSchemeText: string,
-  fallbackContextText: string = ''
-): Array<{ code: string; description: string; maxMarks: number }> {
-  const lines = markSchemeText
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(
-      (l) =>
-        l.length > 0 &&
-        !/^(?:note|ignore|reject|max\s*\d+|total\s*:?\s*\d+)/i.test(l) &&
-        !/^\([a-z0-9]+\)$/i.test(l)
-    );
-
-  const points: Array<{ code: string; description: string; maxMarks: number }> = [];
-
-  lines.forEach((line) => {
-    const codeMatch = line.match(/^\[([BMAC]\d+|\d+)\]\s*(.*)$/i) || line.match(/^(.*?)\s*\[([BMAC]\d+|\d+)\]\s*;?$/i);
-    if (codeMatch) {
-      const isPrefix = /^\[/.test(line);
-      const rawCode = isPrefix ? codeMatch[1].toUpperCase() : codeMatch[2].toUpperCase();
-      const rawDesc = (isPrefix ? codeMatch[2] : codeMatch[1]).replace(/;\s*$/, '').trim();
-      const normalizedCode = /^\d+$/.test(rawCode) ? `[B${rawCode}]` : `[${rawCode}]`;
-      points.push({
-        code: normalizedCode,
-        description: rawDesc || line,
-        maxMarks: 1,
-      });
-    } else {
-      const cleaned = line.replace(/^[-•*\d.)]+\s*/, '').replace(/;\s*$/, '').trim();
-      if (cleaned) {
-        points.push({
-          code: `[B1]`,
-          description: cleaned,
-          maxMarks: 1,
-        });
-      }
+    const lower = criterion.toLowerCase();
+    if (lower.includes('higher to lower') || lower.includes('down a concentration')) {
+      forbiddenContradictions.push('lower to higher', 'against the gradient');
     }
+    if (lower.includes('lower to higher') || lower.includes('against a concentration')) {
+      forbiddenContradictions.push('higher to lower', 'down the gradient');
+    }
+    if (lower.includes('denatured') || lower.includes('active site changes shape')) {
+      forbiddenContradictions.push('enzyme is killed', 'enzymes die');
+    }
+    if (lower.includes('turgid')) {
+      forbiddenContradictions.push('plasmolysed', 'flaccid', 'burst');
+    }
+    if (lower.includes('partially permeable')) {
+      forbiddenContradictions.push('freely permeable', 'impermeable');
+    }
+
+    return {
+      code: `M${idx + 1}`,
+      criterion,
+      keywords,
+      requiredUnits,
+      forbiddenContradictions,
+      maxMarks: 1,
+    };
   });
 
-  if (points.length === 0) {
-    const { matches } = searchBiologyNotes(fallbackContextText || markSchemeText);
-    const topic = matches[0];
-    if (topic) {
-      const bulletLines = topic.content
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter((l) => /^[-•]|^\d+\./.test(l))
-        .slice(0, 3);
-      if (bulletLines.length > 0) {
-        for (const b of bulletLines) {
-          points.push({
-            code: '[B1]',
-            description: b.replace(/^[-•\d.)]+\s*/, '').replace(/\*\*/g, '').trim(),
-            maxMarks: 1,
-          });
-        }
-      }
-    }
-  }
-
-  if (points.length === 0) {
+  // Pad if totalMarks exceeds parsed lines
+  while (points.length < totalMarks) {
+    const idx = points.length;
     points.push({
-      code: '[B1]',
-      description:
-        markSchemeText.trim() ||
-        fallbackContextText.trim() ||
-        'Accurate biological explanation using required syllabus terminology',
+      code: `M${idx + 1}`,
+      criterion: cleanedLines[idx % cleanedLines.length] || 'Additional Cambridge 0610 biological marking point',
+      keywords: extractKeywordsFromCriterion(cleanedLines[idx % cleanedLines.length] || ''),
+      requiredUnits: [],
+      forbiddenContradictions: [],
       maxMarks: 1,
     });
   }
@@ -333,397 +396,289 @@ export function parseMarkSchemePoints(
   return points;
 }
 
-/**
- * Deterministic Cambridge IGCSE 0610 Marking Engine fallback & verification engine.
- * Applies the 7 Cambridge Marking Principles including Whole Marks Only, Positive Marking,
- * Contradictions (CON), Error Carried Forward (ECF), M/A/C/B marks, and Critical Unit Rule.
- */
-export function gradeSubmissionDeterministic(params: {
-  studentAnswer: string;
-  markScheme: string;
-  questionPrompt?: string;
-}): GradingResult {
-  const { studentAnswer, markScheme, questionPrompt = '' } = params;
-  const parsedPoints = parseMarkSchemePoints(
-    markScheme,
-    `${questionPrompt} ${studentAnswer}`
-  );
-  const totalMarks = markScheme.trim()
-    ? detectTotalMarksFromScheme(markScheme)
-    : parsedPoints.length;
-  const unitPrePrinted = hasUnitInPromptOrAnswerLine(questionPrompt, markScheme);
+export function gradeSubmissionDeterministic(
+  studentAnswerRaw: string,
+  markSchemeRaw: string,
+  metadata?: SubmissionMetadata
+): GradingResult {
+  const studentAnswer = (studentAnswerRaw || '').trim();
+  const markScheme = (markSchemeRaw || '').trim();
+  const totalMarks = Math.max(1, detectTotalMarksFromMarkScheme(markScheme));
+  const rubricPoints = buildRubricPoints(markScheme, totalMarks);
 
   const studentLower = studentAnswer.toLowerCase();
+  const studentHasNumber = /\d+(?:\.\d+)?/.test(studentAnswer);
+  const studentUnits = detectUnitsInText(studentAnswer);
 
-  // Check for overt contradictions (CON) in student answer
-  const hasOsmosisActiveTransportCon =
-    studentLower.includes('osmosis') &&
-    studentLower.includes('requires energy') &&
-    studentLower.includes('against concentration gradient');
+  let criticalUnitDeducted = false;
+  let contradictionTriggered = false;
+  const missingKeywords: string[] = [];
 
-  let awardedMarks = 0;
-  let unitRuleTriggered = false;
+  const rubricBreakdown: RubricPointEvaluation[] = rubricPoints.map((pt) => {
+    // Check Critical Unit Rule if the point requires a specific calculation/measurement unit
+    const criterionNumbers = pt.criterion.match(/\b\d+(?:\.\d+)?\b/g) || [];
+    const needsUnit =
+      pt.requiredUnits.length > 0 &&
+      (criterionNumbers.length > 0 || /\b(?:calculate|value|rate|magnification|length|volume|temperature|percentage)\b/i.test(pt.criterion));
 
-  const rubricPoints: RubricPointEvaluation[] = parsedPoints.map((pt) => {
-    // Separate any "(CON: ...)" or "(Note: ...)" annotation from the core rubric description
-    const conNoteMatch = pt.description.match(/\(CON:\s*([^)]+)\)/i);
-    const cleanDescription = pt.description
-      .replace(/\((?:CON|Note):[^)]+\)/gi, '')
-      .replace(/;\s*$/, '')
-      .trim();
-    const descLower = cleanDescription.toLowerCase();
-
-    // Check if this is an Accuracy [A1] numerical point where a unit is mentioned
-    const numbersInRubric = descLower.match(/\b\d+(?:\.\d+)?\b/g) || [];
-    const isAccuracyOrCalc = pt.code.includes('A') || pt.code.includes('M') || numbersInRubric.length > 0;
-
-    // Extract significant keywords from rubric point (>3 chars, excluding filler words)
-    const stopWords = new Set([
-      'from', 'into', 'with', 'that', 'this', 'their', 'they', 'have', 'more', 'less',
-      'than', 'through', 'across', 'down', 'against', 'between', 'which', 'where',
-      'when', 'what', 'only', 'also', 'award', 'mark', 'marks', 'correct', 'unit',
-      'units', 'answer', 'line', 'printed', 'given', 'allow', 'accept', 'ignore'
-    ]);
-
-    const rawKeywords = descLower
-      .replace(/[^a-z0-9.%°/-]+/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length >= 4 && !stopWords.has(w));
-
-    let matched = false;
-    let examinerNote = '';
-
-    // Check numerical accuracy match first
-    if (isAccuracyOrCalc && numbersInRubric.length > 0) {
-      const allNumbersPresent = numbersInRubric.every((num) => studentLower.includes(num));
-      if (allNumbersPresent) {
-        matched = true;
-        if (unitPrePrinted) {
-          unitRuleTriggered = true;
-          examinerNote =
-            'Full accuracy mark awarded. Under the Cambridge Unit Rule, the unit is already printed on the answer line/prompt, so writing the numerical value alone earns full credit.';
-        } else {
-          examinerNote = 'Correct numerical calculation/value clearly stated.';
-        }
-      }
+    if (needsUnit && studentHasNumber && studentUnits.length === 0) {
+      criticalUnitDeducted = true;
+      return {
+        code: pt.code,
+        criterion: pt.criterion,
+        maxMarks: pt.maxMarks,
+        awardedMarks: 0,
+        status: 'missed',
+        studentEvidence: 'Numeric value provided without a biological unit.',
+        examinerNote: `Critical Unit Rule applied: expected unit (${pt.requiredUnits.join(' / ')}) was omitted.`,
+      };
     }
 
-    if (!matched) {
-      // Keyword / concept matching
-      const matchCount = rawKeywords.filter((kw) => {
-        const stem = kw.length > 6 ? kw.slice(0, kw.length - 2) : kw;
-        return studentLower.includes(stem);
-      }).length;
-
-      const requiredMatches = Math.max(1, Math.ceil(rawKeywords.length * 0.4));
-      if (rawKeywords.length > 0 && matchCount >= requiredMatches) {
-        matched = true;
-        examinerNote = 'Student accurately included the required Cambridge syllabus terminology in proper biological context.';
-      }
+    // Check Contradiction Rule (CON)
+    const contradictedBy = pt.forbiddenContradictions.find((phrase) => studentLower.includes(phrase));
+    if (contradictedBy) {
+      contradictionTriggered = true;
+      return {
+        code: pt.code,
+        criterion: pt.criterion,
+        maxMarks: pt.maxMarks,
+        awardedMarks: 0,
+        status: 'contradicted',
+        studentEvidence: `Contains contradicting statement: "${contradictedBy}".`,
+        examinerNote: 'Contradiction Rule (CON): incorrect biological statement negates this mark point.',
+      };
     }
 
-    // Apply explicit (CON: ...) rule if present in rubric
-    if (matched && conNoteMatch) {
-      const conText = conNoteMatch[1].toLowerCase();
-      if (conText.includes('cell wall bursts') && studentLower.includes('cell wall bursts')) {
-        matched = false;
-        examinerNote = `Mark withheld due to Contradiction [CON]: ${conNoteMatch[1].trim()}.`;
-      }
+    // Synonym/keyword matching
+    const matchedKeywords = pt.keywords.filter((kw) => {
+      if (studentLower.includes(kw)) return true;
+      // Basic stem check
+      if (kw.length >= 6 && studentLower.includes(kw.slice(0, -1))) return true;
+      return false;
+    });
+
+    const requiredMatchThreshold = pt.keywords.length <= 2 ? 1 : Math.max(2, Math.ceil(pt.keywords.length * 0.4));
+    const isNumberMatched =
+      criterionNumbers.length === 0 || criterionNumbers.some((num) => studentAnswer.includes(num));
+
+    const awarded = matchedKeywords.length >= requiredMatchThreshold && isNumberMatched;
+
+    if (awarded) {
+      return {
+        code: pt.code,
+        criterion: pt.criterion,
+        maxMarks: pt.maxMarks,
+        awardedMarks: 1,
+        status: 'awarded',
+        studentEvidence: `Matched key terminology: ${matchedKeywords.slice(0, 4).join(', ')}.`,
+        examinerNote: 'Mark awarded (whole mark) for meeting the Cambridge 0610 criterion.',
+      };
     }
 
-    // Apply general Contradiction (CON) check
-    if (matched && hasOsmosisActiveTransportCon && descLower.includes('water potential')) {
-      matched = false;
-      examinerNote =
-        'Mark withheld due to Contradiction [CON]: student confused osmosis with active transport requiring energy.';
-    }
-
-    // Cap awarded marks at totalMarks
-    const canAward = matched && awardedMarks < totalMarks;
-    const marksAwarded = canAward ? 1 : 0;
-    if (canAward) {
-      awardedMarks += 1;
-    } else if (!examinerNote) {
-      examinerNote =
-        'Key syllabus concept or required terminology was omitted or insufficiently specific in the student response.';
-    }
+    const missed = pt.keywords.filter((kw) => !matchedKeywords.includes(kw)).slice(0, 3);
+    missingKeywords.push(...missed);
 
     return {
       code: pt.code,
-      description: cleanDescription,
-      satisfied: canAward,
-      marksAwarded,
+      criterion: pt.criterion,
       maxMarks: pt.maxMarks,
-      examinerNote,
+      awardedMarks: 0,
+      status: 'missed',
+      studentEvidence: matchedKeywords.length > 0 ? `Partial mention (${matchedKeywords.join(', ')}), insufficient precision.` : 'Key marking point omitted.',
+      examinerNote: missed.length > 0 ? `Missing key term(s): ${missed.join(', ')}.` : 'Criterion not clearly addressed.',
     };
   });
 
-  awardedMarks = Math.min(totalMarks, Math.round(awardedMarks));
-  const marksLost = Math.max(0, totalMarks - awardedMarks);
-  const { grade, percentage } = calculateCambridgeGrade(awardedMarks, totalMarks);
+  // Whole marks only
+  const awardedMarks = Math.min(
+    totalMarks,
+    rubricBreakdown.reduce((sum, item) => sum + Math.round(item.awardedMarks), 0)
+  );
+  const percentage = Math.round((awardedMarks / totalMarks) * 100);
 
-  const lostMarksBreakdown: LostMarkBreakdown[] = rubricPoints
-    .filter((r) => !r.satisfied)
-    .slice(0, marksLost)
-    .map((r) => ({
-      rubricCode: r.code,
-      whatWasWrong:
-        studentAnswer.trim().length === 0
-          ? 'No response was provided for this marking point.'
-          : r.examinerNote.includes('Contradiction [CON]')
-          ? r.examinerNote
-          : `Your answer did not state or clearly explain: "${r.description}".`,
-      whyMarkDeducted:
-        r.examinerNote.includes('Contradiction [CON]')
-          ? 'Under Cambridge IGCSE 0610 Contradiction (CON) rules, stating an incorrect contradictory biological claim in the same part cancels credit for an otherwise valid point.'
-          : 'Under Cambridge IGCSE 0610 Positive Marking and Keyword Context rules, marks can only be awarded when the exact biological process, structure, or relationship specified in the mark scheme is explicitly stated.',
-      howToEarnFullMarks: `Include the precise point: "${r.description}" using exact Cambridge 0610 terminology without contradictory statements.`,
-    }));
+  const uniqueMissingKeywords = Array.from(new Set(missingKeywords)).slice(0, 8);
+  const ocrContext = metadata?.usedOcr ? ' (including OCR-transcribed work)' : '';
 
-  const correctedVersion = rubricPoints.map((p) => p.description).join('. ') + '.';
+  const examinerSummary = [
+    `The student scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%)${ocrContext} under strict Cambridge IGCSE Biology (0610) whole-mark rules.`,
+    criticalUnitDeducted
+      ? 'A mark was withheld under the Critical Unit Rule because a numeric answer lacked its required unit.'
+      : '',
+    contradictionTriggered
+      ? 'One or more marking points were negated under the Contradiction Rule (CON) due to conflicting biological statements.'
+      : '',
+    uniqueMissingKeywords.length > 0
+      ? `To achieve full marks, include exact syllabus keywords such as: ${uniqueMissingKeywords.join(', ')}.`
+      : 'All required biological terminology and marking points were accurately addressed.',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
-  const firstLine = (questionPrompt || markScheme).split(/\r?\n/)[0] || 'Cambridge IGCSE 0610 Question';
-  const questionTitle =
-    firstLine.replace(/^\[.*?\]\s*/, '').slice(0, 68) || 'Cambridge IGCSE Biology Question';
+  const correctedVersion = rubricBreakdown
+    .map((pt, idx) => `${idx + 1}. ${pt.criterion}`)
+    .join('\n');
 
-  const examinerSummary =
-    marksLost === 0
-      ? `Excellent response! You achieved full marks (${awardedMarks}/${totalMarks}) by hitting every required Cambridge 0610 marking point${unitRuleTriggered ? ' (Critical Unit Rule applied: full accuracy credit awarded without penalizing pre-printed units)' : ''}.`
-      : `You scored ${awardedMarks} out of ${totalMarks} marks (${percentage}%). Review the ${marksLost} missed marking point${marksLost === 1 ? '' : 's'} below to ensure all underlined Cambridge Biology keywords are included.`;
-
-  const howToEarnFullMarksSummary =
-    marksLost === 0
-      ? `You earned full marks (${awardedMarks}/${totalMarks}). Keep using exact Cambridge 0610 biological keywords in context.`
-      : lostMarksBreakdown
-          .map((item, idx) => `${idx + 1}. **${item.rubricCode}**: ${item.howToEarnFullMarks}`)
-          .join('\n');
+  const examinerTip = criticalUnitDeducted
+    ? 'Always check every calculated number and include the correct unit (e.g. µm, mm, cm³, %, °C) to avoid losing the final mark.'
+    : contradictionTriggered
+      ? 'Avoid adding extra guessed statements that contradict your correct point — Cambridge CON rules cancel the mark if right and wrong answers appear together.'
+      : 'Use precise Cambridge 0610 command words and syllabus keywords (e.g. water potential, partially permeable membrane, complementary active site, kinetic energy).';
 
   return {
-    questionTitle,
-    grade,
-    percentage,
     awardedMarks,
     totalMarks,
-    marksLost,
+    percentage,
+    criticalUnitDeducted,
+    contradictionTriggered,
+    extractedStudentAnswer: studentAnswer,
+    extractedMarkScheme: markScheme,
+    rubricBreakdown,
     examinerSummary,
-    unitRuleApplied: unitRuleTriggered,
-    transcribedStudentAnswer: studentAnswer.trim() || undefined,
-    transcribedMarkScheme:
-      markScheme.trim() ||
-      rubricPoints.map((p) => `${p.code} ${p.description};`).join('\n'),
-    howToEarnFullMarksSummary,
-    rubricPoints,
-    lostMarksBreakdown,
     correctedVersion,
+    missingKeywords: uniqueMissingKeywords,
+    examinerTip,
   };
 }
 
-/**
- * Extracts the most relevant subsection(s) from a syllabus topic and generates a clear thought process.
- */
+export function getFullSyllabusSystemPrompt(): string {
+  const topicList = BIOLOGY_SYLLABUS_NOTES.map(
+    (t) => `${t.topicNumber} — ${t.title}: ${t.summary}`
+  ).join('\n');
+
+  return `You are Biology DA7EE7, a dedicated Cambridge IGCSE Biology (0610) Subject Tutor.
+CRITICAL GROUNDING RULES:
+1. You must answer ONLY Cambridge IGCSE Biology (0610) syllabus questions using accurate 0610 marking terminology.
+2. If the user asks about a non-biology subject (e.g., physics, chemistry, mathematics, history, coding, politics), politely refuse and redirect them to Cambridge IGCSE Biology (0610) topics.
+3. Never use raw markdown symbols like #, **, or backticks inside prose when clean numbered/bulleted structure works cleanly; keep headings concise, highlight key 0610 keywords, and give clear exam tips.
+4. Never mention grades (A*, A, B, etc.) as a student score label.
+
+Covered Cambridge 0610 Syllabus Topics:
+${topicList}`;
+}
+
+export function getCompactTutorSystemPrompt(): string {
+  return `You are Biology DA7EE7, a Cambridge IGCSE Biology (0610) Tutor.
+RULES:
+1. Answer ONLY 0610 Biology using exact mark-scheme keywords and scientific accuracy; politely decline off-syllabus subjects.
+2. Be crisp and fast: ~45-85 words for definitions/short queries, ~85-135 words for processes/diagrams unless full detail is requested.
+3. Use short headings and numbered/bulleted points; never use #, **, backticks, or letter grades (A*-U).`;
+}
+
+export function computeTypewriterAdvance(
+  currentLength: number,
+  targetLength: number,
+  streamComplete: boolean
+): number {
+  const remaining = targetLength - currentLength;
+  if (remaining <= 0) return targetLength;
+  if (remaining <= 12 && streamComplete) return targetLength;
+
+  // High-speed 60fps wipe: sweeps rapidly with the live stream without lagging on 30fps mobile devices
+  const step = streamComplete
+    ? Math.max(20, Math.ceil(remaining / 3))
+    : Math.max(14, Math.ceil(remaining / 4));
+
+  return Math.min(targetLength, currentLength + step);
+}
+
 export function generateTutorThoughtAndAnswer(question: string): {
   thought: string;
-  reply: string;
+  answer: string;
+  outOfScope: boolean;
+  matchedTopics: string[];
 } {
   const { matches, isOutOfScope } = searchBiologyNotes(question);
+
   if (isOutOfScope || matches.length === 0) {
     return {
-      thought: `1. Analyzed student query: "${question}".\n2. Checked Cambridge IGCSE Biology (0610) syllabus topics (Topics 2–18).\n3. Determined query falls outside the scope of the course notes.`,
-      reply:
-        'Based on our **Cambridge IGCSE Biology (0610)** course notes, this specific query falls outside the topics covered in the computerized notes. Please ask about any covered syllabus topic such as **Cells**, **Movement In and Out of Cells**, **Enzymes**, **Nutrition**, **Plant Nutrition & Transport**, **Circulatory System & Immunity**, **Respiration**, **Excretion**, **Coordination & Homeostasis**, **Reproduction**, **Inheritance**, **Biotechnology**, or **Ecology**.',
+      thought: 'Checked Cambridge IGCSE Biology (0610) curriculum scope: query falls outside Biology 0610.',
+      answer: [
+        'Out of Syllabus Scope (Cambridge IGCSE Biology 0610)',
+        '',
+        'I am Biology DA7EE7, trained exclusively for Cambridge IGCSE Biology (0610). Your question appears to be outside the 0610 Biology syllabus.',
+        '',
+        'Topics I can help you master:',
+        '- Cell structure, specialisation, and magnification calculations',
+        '- Diffusion, osmosis (water potential), and active transport',
+        '- Enzymes, biological molecules, and food tests',
+        '- Photosynthesis, human nutrition, transport in plants & animals',
+        '- Immunity, gas exchange, respiration, homeostasis, genetics, and ecology',
+      ].join('\n'),
+      outOfScope: true,
+      matchedTopics: [],
     };
   }
 
   const primary = matches[0];
-  const queryWords = question
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && !['the', 'and', 'what', 'how', 'why', 'explain', 'define', 'describe', 'for', 'are'].includes(w));
+  const secondary = matches[1];
+  const matchedTopics = matches.map((m) => `${m.topicNumber}: ${m.title}`);
 
-  // Split primary topic into ### subsections so we return focused, relevant sections instead of unrelated chapters
-  const rawSections = primary.content
-    .split(/(?=^###\s+)/m)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const lines: string[] = [
+    `${primary.topicNumber}: ${primary.title}`,
+    primary.summary,
+    '',
+    'Key Syllabus Points (0610 Mark Scheme Phrasing):',
+    ...primary.coreConcepts.map((c, i) => `${i + 1}. ${c}`),
+    '',
+    'Examiner Tips:',
+    ...primary.examTips.map((tip) => `- ${tip}`),
+  ];
 
-  const scoredSections = rawSections.map((sec) => {
-    const secLower = sec.toLowerCase();
-    let score = 0;
-    for (const w of queryWords) {
-      if (secLower.includes(w)) score += 2;
-    }
-    return { sec, score };
-  });
+  if (secondary) {
+    lines.push(
+      '',
+      `Related Syllabus Link (${secondary.topicNumber}: ${secondary.title}):`,
+      ...secondary.coreConcepts.slice(0, 2).map((c) => `- ${c}`)
+    );
+  }
 
-  scoredSections.sort((a, b) => b.score - a.score);
-  const bestSections = scoredSections.filter((s) => s.score > 0).map((s) => s.sec);
-  const selectedContent =
-    bestSections.length > 0
-      ? bestSections[0]
-      : rawSections[0] || primary.content;
-
-  const matchedKeywords = primary.keywords
-    .filter((kw) => question.toLowerCase().includes(kw.toLowerCase()))
-    .slice(0, 5);
-
-  const thought = [
-    `1. Identified syllabus topic: **${primary.title}**.`,
-    `2. Matched key biology concepts: **${
-      matchedKeywords.length > 0
-        ? matchedKeywords.join(', ')
-        : queryWords.slice(0, 4).join(', ') || primary.summary.slice(0, 50)
-    }**.`,
-    `3. Extracted exact Cambridge IGCSE (0610) definitions and mark-scheme keywords from the course notes.`,
-  ].join('\n');
-
-  const reply = `### ${primary.title}\n\n${selectedContent}`;
-  return { thought, reply };
+  return {
+    thought: `Matched Cambridge 0610 syllabus references: ${matchedTopics.join(' | ')}.`,
+    answer: lines.join('\n'),
+    outOfScope: false,
+    matchedTopics,
+  };
 }
 
-/**
- * Deterministic Tutor fallback grounded strictly in the attached Biology 0610 computerized notes.
- */
-export function answerBiologyTutorDeterministic(question: string): string {
-  return generateTutorThoughtAndAnswer(question).reply;
-}
-
-/**
- * Deterministic Examiner Chat fallback for follow-up questions on a graded submission.
- */
 export function answerExaminerChatDeterministic(
   question: string,
-  result: GradingResult,
+  gradingResult: GradingResult,
   studentAnswer: string,
   markScheme: string
 ): string {
   const qLower = question.toLowerCase();
+  const missedPoints = gradingResult.rubricBreakdown.filter((r) => r.status !== 'awarded');
+  const awardedPoints = gradingResult.rubricBreakdown.filter((r) => r.status === 'awarded');
 
-  if (qLower.includes('unit') || qLower.includes('formula') || qLower.includes('number')) {
-    return [
-      `### Cambridge IGCSE 0610 Unit & Calculation Rule`,
-      `- **Critical Unit Rule**: If the unit is already included in the question prompt or printed on the answer line (for example, \`........... beats / min\`), examiners **do not deduct any marks** if you only write the numerical value.`,
-      `- **Method [M] & Accuracy [A] Marks**: Showing your working formula earns the **[M1]** method mark even if an arithmetic slip occurs, and **Error Carried Forward (ECF)** protects subsequent steps.`,
-      `- **Your Submission Status**: You were awarded **${result.awardedMarks} / ${result.totalMarks} marks** (${result.percentage}%).`,
-    ].join('\n');
+  if (qLower.includes('why') || qLower.includes('lost') || qLower.includes('miss') || qLower.includes('deduct')) {
+    if (missedPoints.length === 0) {
+      return `You achieved full marks (${gradingResult.awardedMarks}/${gradingResult.totalMarks}) on this question! Every Cambridge 0610 marking point was satisfied.`;
+    }
+    const list = missedPoints
+      .map((pt, i) => `${i + 1}. [${pt.code}] ${pt.criterion}\n   Reason: ${pt.examinerNote}`)
+      .join('\n');
+    return `Marks lost breakdown (${gradingResult.awardedMarks}/${gradingResult.totalMarks} awarded):\n\n${list}\n\nTip: ${gradingResult.examinerTip}`;
   }
 
-  const missed = result.rubricPoints.filter((p) => !p.satisfied);
-  if (missed.length === 0) {
-    return [
-      `### Full Marks Achieved (${result.awardedMarks}/${result.totalMarks})`,
-      `- Your response satisfied every required rubric point in the official mark scheme.`,
-      `- **Alternative Wording Rule**: Cambridge examiners accept equivalent scientific phrasing (**ORA** — Or Reverse Argument) provided the exact biological terms are used in context without contradiction (**CON**).`,
-      `- **Model Full-Mark Phrasing**: ${result.correctedVersion}`,
-    ].join('\n');
+  if (qLower.includes('full mark') || qLower.includes('model') || qLower.includes('improve') || qLower.includes('correct')) {
+    return `To secure all ${gradingResult.totalMarks} marks, include every mark-scheme point clearly:\n\n${gradingResult.correctedVersion}\n\nMissing keywords to add: ${
+      gradingResult.missingKeywords.length > 0 ? gradingResult.missingKeywords.join(', ') : 'None'
+    }.`;
   }
+
+  const search = searchBiologyNotes(`${question} ${markScheme} ${studentAnswer}`);
+  const topicNote =
+    !search.isOutOfScope && search.matches[0]
+      ? `\n\nSyllabus Reference (${search.matches[0].topicNumber}: ${search.matches[0].title}):\n- ${search.matches[0].coreConcepts[0]}`
+      : '';
 
   return [
-    `### Examiner Breakdown for Your Question (${result.awardedMarks}/${result.totalMarks} marks)`,
-    `- **Awarded Credit**: You earned **${result.awardedMarks}** whole mark(s) via positive marking for valid points present in your answer.`,
-    ...missed.map(
-      (m, idx) =>
-        `${idx + 1}. **Missed ${m.code}**: The mark scheme requires **${m.description}**. ${m.examinerNote}`
-    ),
-    `- **How to Word It for Full Credit**: ${result.correctedVersion}`,
-  ].join('\n');
-}
-
-/**
- * Parses inline segments (**bold** and `code`) without ever leaving raw asterisks (`**`) in output.
- */
-export function parseInlineSegments(rawText: string): FormattedSegment[] {
-  // Clean stray single/triple asterisks or unmatched ** so raw asterisks never appear
-  const segments: FormattedSegment[] = [];
-  const tokenRegex = /(\*\*[^*]+\*\*|`[^`]+`)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = tokenRegex.exec(rawText)) !== null) {
-    if (match.index > lastIndex) {
-      const plain = rawText.slice(lastIndex, match.index).replace(/\*\*/g, '');
-      if (plain) segments.push({ type: 'text', value: plain });
-    }
-    const token = match[0];
-    if (token.startsWith('**') && token.endsWith('**')) {
-      const inner = token.slice(2, -2).replace(/\*\*/g, '').trim();
-      if (inner) segments.push({ type: 'bold', value: inner });
-    } else if (token.startsWith('`') && token.endsWith('`')) {
-      const inner = token.slice(1, -1).trim();
-      if (inner) segments.push({ type: 'code', value: inner });
-    }
-    lastIndex = match.index + token.length;
-  }
-
-  if (lastIndex < rawText.length) {
-    const tail = rawText.slice(lastIndex).replace(/\*\*/g, '');
-    if (tail) segments.push({ type: 'text', value: tail });
-  }
-
-  return segments.length > 0 ? segments : [{ type: 'text', value: rawText.replace(/\*\*/g, '') }];
-}
-
-/**
- * Parses multi-line markdown-like text into structured lines for FormattedContent component.
- */
-export function parseFormattedLines(content: string): ParsedLine[] {
-  if (!content) return [];
-  const rawLines = content.split(/\r?\n/);
-
-  return rawLines.map((rawLine): ParsedLine => {
-    const trimmed = rawLine.trim();
-    if (!trimmed) {
-      return { kind: 'spacer', segments: [] };
-    }
-
-    if (/^#{1,4}\s+/.test(trimmed)) {
-      const headingText = trimmed.replace(/^#{1,4}\s+/, '').replace(/\*\*/g, '');
-      return {
-        kind: 'heading',
-        segments: parseInlineSegments(`**${headingText}**`),
-      };
-    }
-
-    if (/^[-•*]\s+/.test(trimmed)) {
-      const bulletText = trimmed.replace(/^[-•*]\s+/, '');
-      return {
-        kind: 'bullet',
-        segments: parseInlineSegments(bulletText),
-      };
-    }
-
-    const numMatch = trimmed.match(/^(\d+)[.)]\s+(.*)$/);
-    if (numMatch) {
-      return {
-        kind: 'numbered',
-        numberLabel: numMatch[1].padStart(2, '0'),
-        segments: parseInlineSegments(numMatch[2]),
-      };
-    }
-
-    return {
-      kind: 'paragraph',
-      segments: parseInlineSegments(trimmed),
-    };
-  });
-}
-
-export function getFullSyllabusSystemPrompt(query?: string): string {
-  const { matches } = searchBiologyNotes(query || '');
-  const selectedTopics =
-    matches.length > 0 ? matches.slice(0, 3) : BIOLOGY_SYLLABUS_NOTES.slice(0, 3);
-
-  const compiledNotes = selectedTopics
-    .map((s) => `=== ${s.title} ===\n${s.content}`)
-    .join('\n\n');
-
-  return `You are the Cambridge IGCSE Biology (0610) AI Subject Tutor.
-CRITICAL KNOWLEDGE BASE RULES:
-1. You must answer ONLY using the biological facts, definitions, processes, and marking points contained in the Cambridge IGCSE Biology (0610) computerized course notes provided below.
-2. Do NOT provide answers outside of these computerized course notes. If a student asks about something outside Cambridge IGCSE Biology (0610) or outside these notes, politely state that you only provide answers grounded in the Cambridge IGCSE Biology (0610) course notes.
-3. NEVER mention internal file names (such as "Computerized Notes part 1.pdf" or "p2.pdf") and NEVER mention any author names in your responses.
-4. Structure your responses clearly using ### headings, bullet points (- ), numbered steps (1. ), **bold key terms** for Cambridge syllabus keywords that carry marks, and \`inline formulas or equations\`.
-
-CAMBRIDGE IGCSE BIOLOGY (0610) COURSE NOTES:
-${compiledNotes}`;
+    `Examiner Review (${gradingResult.awardedMarks}/${gradingResult.totalMarks} marks):`,
+    `- Awarded points: ${awardedPoints.length}`,
+    `- Missed/contradicted points: ${missedPoints.length}`,
+    missedPoints[0] ? `- Focus next on [${missedPoints[0].code}]: ${missedPoints[0].criterion}` : '',
+    topicNote,
+  ]
+    .filter(Boolean)
+    .join('\n');
 }

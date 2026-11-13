@@ -1,7 +1,7 @@
-name = "da7ee7biology"
+name = "da7ee7-biology"
 main = "cloudflare-worker.js"
 compatibility_date = "2025-02-01"
 
 [[services]]
 binding = "ai-studio-applet"
-service = "da7ee7biology"
+service = "da7ee7-biology"
